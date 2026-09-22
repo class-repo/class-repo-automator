@@ -102,7 +102,7 @@ app.get('/callback', async (req, res) => {
 unset GITHUB_TOKEN
 
 echo "Authenticating GitHub CLI..."
-gh auth login -s repo
+gh auth login --hostname github.com --git-protocol https --web -s repo
 echo "Saving secrets..."
 gh secret set APP_ID --body "${appId}"
 gh secret set APP_PRIVATE_KEY --body "${pemKey.replace(/\\n/g, '\\n')}"
