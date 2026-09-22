@@ -1,0 +1,12 @@
+{
+  "name": "ClassRepo Setup Node.js",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:18",
+  "forwardPorts": [3000],
+  "postCreateCommand": "npm install && node setup/server.js",
+  "customizations": {
+    "vscode": {
+      "settings": {},
+      "extensions": ["dbaeumer.vscode-eslint"]
+    }
+  }
+}

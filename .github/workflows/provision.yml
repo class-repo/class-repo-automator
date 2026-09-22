@@ -1,0 +1,48 @@
+name: Provision Student Repository
+
+on:
+  repository_dispatch:
+    types: [create_student_repo]
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate App Token
+        id: generate-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          
+      - name: Checkout Automator
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
+
+      - name: Create Repo and Add Collaborator
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+          STUDENT_USERNAME: ${{ github.event.client_payload.student_username }}
+          TEMPLATE_REPO: ${{ github.event.client_payload.template_repo }}
+        run: |
+          NEW_REPO_NAME="${TEMPLATE_REPO}-${STUDENT_USERNAME}"
+          
+          # Check if repository already exists (idempotency)
+          if gh repo view "${{ github.repository_owner }}/$NEW_REPO_NAME" > /dev/null 2>&1; then
+            echo "Repository $NEW_REPO_NAME already exists. Skipping creation."
+            exit 0
+          fi
+          
+          echo "Creating repository $NEW_REPO_NAME from template $TEMPLATE_REPO..."
+          gh repo create "${{ github.repository_owner }}/$NEW_REPO_NAME" \
+            --template "${{ github.repository_owner }}/$TEMPLATE_REPO" \
+            --private
+            
+          echo "Inviting $STUDENT_USERNAME to $NEW_REPO_NAME..."
+          gh api \
+            --method PUT \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository_owner }}/$NEW_REPO_NAME/collaborators/$STUDENT_USERNAME" \
+            -f permission=push
