@@ -1,0 +1,11 @@
+{
+  "name": "class-repo-automator",
+  "version": "1.0.0",
+  "description": "ClassRepo Setup Automator",
+  "scripts": {
+    "start": "node setup/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
