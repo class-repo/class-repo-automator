@@ -98,6 +98,9 @@ app.get('/callback', async (req, res) => {
       
       const fs = require('fs');
       const scriptContent = `#!/bin/bash
+# Unset the default codespace token so gh uses our new interactive token
+unset GITHUB_TOKEN
+
 echo "Authenticating GitHub CLI..."
 gh auth login -s repo
 echo "Saving secrets..."
