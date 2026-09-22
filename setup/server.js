@@ -65,32 +65,52 @@ app.get('/callback', async (req, res) => {
     const pemKey = appData.pem;
     const appId = appData.id;
 
-    // Use GitHub CLI to set the secret
-    execSync(`gh secret set APP_PRIVATE_KEY --body "${pemKey}"`);
-    execSync(`gh secret set APP_ID --body "${appId}"`);
+    try {
+      // Use GitHub CLI to set the secret
+      execSync(`gh secret set APP_PRIVATE_KEY --body "${pemKey}"`);
+      execSync(`gh secret set APP_ID --body "${appId}"`);
 
-    res.send(`
-      <h1>Success!</h1>
-      <p>The GitHub App was created and the private key was securely saved as a GitHub Action Secret!</p>
-      <p><strong>App ID:</strong> ${appId}</p>
-      <p>Please enter this App ID into ClassRepo.org to finalize the setup.</p>
-      <p>You can now safely close this Codespace. It will be deleted automatically.</p>
-    `);
-
-    // Clean up codespace
-    const codespaceName = process.env.CODESPACE_NAME;
-    if (codespaceName) {
-        setTimeout(() => {
-            try {
-                execSync(`gh codespace delete -c ${codespaceName}`);
-            } catch (e) {
-                console.error("Failed to delete codespace automatically:", e);
-            }
-        }, 5000);
+      res.send(`
+        <h1>Success!</h1>
+        <p>The GitHub App was created and the private key was securely saved as a GitHub Action Secret!</p>
+        <p><strong>App ID:</strong> ${appId}</p>
+        <p>Please enter this App ID into ClassRepo.org to finalize the setup.</p>
+        <p>You can now safely close this Codespace. It will be deleted automatically.</p>
+      `);
+      
+      // Clean up codespace
+      const codespaceName = process.env.CODESPACE_NAME;
+      if (codespaceName) {
+          setTimeout(() => {
+              try {
+                  execSync(`gh codespace delete -c ${codespaceName}`);
+              } catch (e) {
+                  console.error("Failed to delete codespace automatically:", e);
+              }
+          }, 5000);
+      }
+      
+      // Stop the server
+      setTimeout(() => process.exit(0), 10000);
+      
+    } catch (ghError) {
+      console.error(ghError);
+      res.send(`
+        <h1>Almost there!</h1>
+        <p>The GitHub App was successfully created (App ID: <strong>${appId}</strong>), but your Codespace does not have the permissions required to save the secrets automatically.</p>
+        <p>Please follow these manual steps to finish the setup:</p>
+        <ol>
+          <li>Open the terminal in this Codespace.</li>
+          <li>Run <code>gh auth login -s repo</code> and follow the prompts to authenticate.</li>
+          <li>Once authenticated, run the following commands to save your secrets:</li>
+        </ol>
+        <pre style="background: #f4f4f4; padding: 10px; border-radius: 5px;">
+gh secret set APP_ID --body "${appId}"
+gh secret set APP_PRIVATE_KEY --body "${pemKey.replace(/\\n/g, '\\n')}"
+        </pre>
+        <p>After that, you can safely close and delete this Codespace.</p>
+      `);
     }
-    
-    // Stop the server
-    setTimeout(() => process.exit(0), 10000);
 
   } catch (error) {
     console.error(error);
