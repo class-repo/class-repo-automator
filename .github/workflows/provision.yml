@@ -3,6 +3,16 @@ name: Provision Student Repository
 on:
   repository_dispatch:
     types: [create_student_repo]
+  workflow_dispatch:
+    inputs:
+      student_username:
+        description: 'GitHub Username of the Student'
+        required: true
+        type: string
+      template_repo:
+        description: 'Name of the template repository to clone'
+        required: true
+        type: string
 
 jobs:
   provision:
@@ -24,8 +34,8 @@ jobs:
       - name: Create Repo and Add Collaborator
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
-          STUDENT_USERNAME: ${{ github.event.client_payload.student_username }}
-          TEMPLATE_REPO: ${{ github.event.client_payload.template_repo }}
+          STUDENT_USERNAME: ${{ github.event.client_payload.student_username || inputs.student_username }}
+          TEMPLATE_REPO: ${{ github.event.client_payload.template_repo || inputs.template_repo }}
         run: |
           NEW_REPO_NAME="${TEMPLATE_REPO}-${STUDENT_USERNAME}"
           
