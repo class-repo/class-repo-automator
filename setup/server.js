@@ -102,14 +102,16 @@ app.get('/callback', async (req, res) => {
 unset GITHUB_TOKEN
 
 echo "Authenticating GitHub CLI..."
-gh auth login --hostname github.com --git-protocol https --web -s repo
+gh auth login --hostname github.com --git-protocol https --web -s repo -s codespace
 echo "Saving secrets..."
 gh secret set APP_ID --body "${appId}"
 gh secret set APP_PRIVATE_KEY --body "${pemKey.replace(/\\n/g, '\\n')}"
 echo "Secrets saved successfully!"
 echo "Cleaning up..."
 rm setup_classrepo.sh
-echo "Setup complete! You can now safely close and delete this Codespace."
+echo "Setup complete! Self-destructing this Codespace in 5 seconds..."
+sleep 5
+gh codespace delete -c $CODESPACE_NAME
 `;
       fs.writeFileSync('setup_classrepo.sh', scriptContent);
       execSync('chmod +x setup_classrepo.sh');
