@@ -95,20 +95,30 @@ app.get('/callback', async (req, res) => {
       
     } catch (ghError) {
       console.error(ghError);
+      
+      const fs = require('fs');
+      const scriptContent = `#!/bin/bash
+echo "Authenticating GitHub CLI..."
+gh auth login -s repo
+echo "Saving secrets..."
+gh secret set APP_ID --body "${appId}"
+gh secret set APP_PRIVATE_KEY --body "${pemKey.replace(/\\n/g, '\\n')}"
+echo "Secrets saved successfully!"
+echo "Cleaning up..."
+rm setup_classrepo.sh
+echo "Setup complete! You can now safely close and delete this Codespace."
+`;
+      fs.writeFileSync('setup_classrepo.sh', scriptContent);
+      execSync('chmod +x setup_classrepo.sh');
+
       res.send(`
         <h1>Almost there!</h1>
         <p>The GitHub App was successfully created (App ID: <strong>${appId}</strong>), but your Codespace does not have the permissions required to save the secrets automatically.</p>
-        <p>Please follow these manual steps to finish the setup:</p>
-        <ol>
-          <li>Open the terminal in this Codespace.</li>
-          <li>Run <code>gh auth login -s repo</code> and follow the prompts to authenticate.</li>
-          <li>Once authenticated, run the following commands to save your secrets:</li>
-        </ol>
-        <pre style="background: #f4f4f4; padding: 10px; border-radius: 5px;">
-gh secret set APP_ID --body "${appId}"
-gh secret set APP_PRIVATE_KEY --body "${pemKey.replace(/\\n/g, '\\n')}"
+        <p>To finish the setup quickly, please open the terminal in this Codespace and run the following command:</p>
+        <pre style="background: #f4f4f4; padding: 10px; border-radius: 5px; font-size: 16px;">
+./setup_classrepo.sh
         </pre>
-        <p>After that, you can safely close and delete this Codespace.</p>
+        <p>This script will ask you to authenticate, automatically save your secrets, and clean itself up when finished.</p>
       `);
     }
 
