@@ -2,57 +2,78 @@ name: Provision Student Repository
 
 on:
   repository_dispatch:
-    types: [create_student_repo]
-  workflow_dispatch:
-    inputs:
-      student_username:
-        description: 'GitHub Username of the Student'
-        required: true
-        type: string
-      template_repo:
-        description: 'Name of the template repository to clone'
-        required: true
-        type: string
+    types: [create_repo]
+
+permissions:
+  contents: write
 
 jobs:
   provision:
     runs-on: ubuntu-latest
     steps:
-      - name: Generate App Token
-        id: generate-token
+      - name: Generate Executor App Token
+        id: app-token
         uses: actions/create-github-app-token@v1
         with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CLASSREPO_APP_ID }}
+          private-key: ${{ secrets.CLASSREPO_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          
-      - name: Checkout Automator
-        uses: actions/checkout@v4
-        with:
-          token: ${{ steps.generate-token.outputs.token }}
 
-      - name: Create Repo and Add Collaborator
+      - name: Create Repository from Template
         env:
-          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
-          STUDENT_USERNAME: ${{ github.event.client_payload.student_username || inputs.student_username }}
-          TEMPLATE_REPO: ${{ github.event.client_payload.template_repo || inputs.template_repo }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TEMPLATE: ${{ github.event.client_payload.template }}
+          REPO_NAME: ${{ github.event.client_payload.repo_name }}
+          OWNER: ${{ github.repository_owner }}
         run: |
-          NEW_REPO_NAME="${TEMPLATE_REPO}-${STUDENT_USERNAME}"
+          echo "Generating repository $REPO_NAME from template $TEMPLATE..."
           
-          # Check if repository already exists (idempotency)
-          if gh repo view "${{ github.repository_owner }}/$NEW_REPO_NAME" > /dev/null 2>&1; then
-            echo "Repository $NEW_REPO_NAME already exists. Skipping creation."
-            exit 0
-          fi
+          # We use gh api to call the template generation endpoint
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/$OWNER/$TEMPLATE/generate \
+            -f owner="$OWNER" \
+            -f name="$REPO_NAME" \
+            -F private=true \
+            -F include_all_branches=false
+
+          echo "Waiting for repository creation to complete..."
+          sleep 3
+
+      - name: Invite Student to Repository
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          STUDENT_HANDLE: ${{ github.event.client_payload.student_handle }}
+          REPO_NAME: ${{ github.event.client_payload.repo_name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          echo "Inviting $STUDENT_HANDLE to $REPO_NAME..."
           
-          echo "Creating repository $NEW_REPO_NAME from template $TEMPLATE_REPO..."
-          gh repo create "${{ github.repository_owner }}/$NEW_REPO_NAME" \
-            --template "${{ github.repository_owner }}/$TEMPLATE_REPO" \
-            --private
-            
-          echo "Inviting $STUDENT_USERNAME to $NEW_REPO_NAME..."
           gh api \
             --method PUT \
             -H "Accept: application/vnd.github+json" \
-            "/repos/${{ github.repository_owner }}/$NEW_REPO_NAME/collaborators/$STUDENT_USERNAME" \
-            -f permission=push
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/$OWNER/$REPO_NAME/collaborators/$STUDENT_HANDLE \
+            -f permission="write"
+
+      - name: Checkout Automator Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log Student Email Securely
+        env:
+          STUDENT_HANDLE: ${{ github.event.client_payload.student_handle }}
+          STUDENT_EMAIL: ${{ github.event.client_payload.student_email }}
+          REPO_NAME: ${{ github.event.client_payload.repo_name }}
+        run: |
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "$STUDENT_HANDLE,$STUDENT_EMAIL,$REPO_NAME,$DATE" >> logs/created_repos.csv
+          
+          git config --global user.name "ClassRepo Automator"
+          git config --global user.email "automator@classrepo.internal"
+          git add logs/created_repos.csv
+          git commit -m "Log repository creation for $STUDENT_HANDLE"
+          git push

@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ClassRepo Admin Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen p-8 font-sans">
+    <div class="max-w-4xl mx-auto space-y-6">
+        <h1 class="text-3xl font-bold text-gray-900">ClassRepo Admin Dashboard</h1>
+        <p class="text-gray-600">Sync encrypted student registrations from Cloudflare to your GitOps repository.</p>
+
+        <div class="bg-white rounded-lg shadow p-6 space-y-4">
+            <h2 class="text-xl font-bold border-b pb-2">1. Configuration</h2>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-bold text-gray-700">Cloudflare Worker URL</label>
+                    <input type="url" id="workerUrl" placeholder="https://classrepo.yourdomain.workers.dev" class="mt-1 w-full p-2 border rounded" value="http://localhost:8787">
+                </div>
+                <div>
+                    <label class="block text-sm font-bold text-gray-700">Class ID</label>
+                    <input type="text" id="classId" placeholder="cs101-fall" class="mt-1 w-full p-2 border rounded">
+                </div>
+                <div class="col-span-2">
+                    <label class="block text-sm font-bold text-gray-700">Decryption Key (64 hex chars)</label>
+                    <input type="password" id="secretKey" placeholder="Paste your generated AES key here" class="mt-1 w-full p-2 border rounded">
+                </div>
+            </div>
+            <button onclick="loginAndSync()" class="mt-4 bg-blue-600 text-white px-4 py-2 rounded font-bold hover:bg-blue-700">
+                1-Click Login and Sync
+            </button>
+        </div>
+
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-bold border-b pb-2">2. Sync Log</h2>
+            <pre id="log" class="mt-4 p-4 bg-gray-900 text-green-400 rounded h-64 overflow-y-auto text-sm font-mono"></pre>
+        </div>
+    </div>
+
+    <script>
+        function logMsg(msg, isError = false) {
+            const logEl = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            logEl.innerHTML += `<div class="${isError ? 'text-red-400' : ''}">[${time}] ${msg}</div>`;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        async function getCryptoKey(hexString) {
+            const keyBytes = new Uint8Array(hexString.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+            return await crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, ["decrypt"]);
+        }
+
+        async function decryptPayload(payload, key) {
+            const parts = payload.split('.');
+            const iv = new Uint8Array(atob(parts[0]).split('').map(c => c.charCodeAt(0)));
+            const ciphertext = new Uint8Array(atob(parts[1]).split('').map(c => c.charCodeAt(0)));
+            
+            const decryptedBuffer = await crypto.subtle.decrypt({ name: "AES-GCM", iv: iv }, key, ciphertext);
+            return JSON.parse(new TextDecoder().decode(decryptedBuffer));
+        }
+
+        let temporaryGithubToken = null;
+
+        window.onload = () => {
+            const hash = window.location.hash.substring(1);
+            if (hash.startsWith('token=')) {
+                temporaryGithubToken = hash.split('=')[1];
+                window.history.replaceState(null, null, window.location.pathname + window.location.search);
+                logMsg("✅ Successfully logged in via OAuth!");
+            }
+        };
+
+        async function loginAndSync() {
+            try {
+                if (temporaryGithubToken) {
+                    await syncQueue();
+                    return;
+                }
+
+                const workerUrl = document.getElementById('workerUrl').value.replace(/\/$/, '');
+                if (!workerUrl) throw new Error("Please enter your Cloudflare Worker URL.");
+
+                logMsg("Redirecting to GitHub for 1-Click Login...");
+                const dashboardUrl = encodeURIComponent(window.location.href);
+                window.location.href = `${workerUrl}/api/github/login?dashboard=${dashboardUrl}`;
+
+            } catch (err) {
+                logMsg(`Auth Error: ${err.message}`, true);
+            }
+        }
+
+        async function syncQueue() {
+            try {
+                if (!temporaryGithubToken) throw new Error("You are not logged in.");
+                const githubToken = temporaryGithubToken;
+
+                logMsg("Starting sync...");
+                
+                const workerUrl = document.getElementById('workerUrl').value.replace(/\/$/, '');
+                const classId = document.getElementById('classId').value;
+                const secretKeyHex = document.getElementById('secretKey').value;
+
+                if (!classId || !secretKeyHex) {
+                    throw new Error("Missing configuration fields.");
+                }
+
+                logMsg(`Fetching queue from Cloudflare for class: ${classId}`);
+                const queueRes = await fetch(`${workerUrl}/api/queue/${classId}`);
+                if (!queueRes.ok) throw new Error("Failed to fetch queue from Cloudflare");
+                const queue = await queueRes.json();
+                
+                if (queue.length === 0) {
+                    logMsg("Queue is empty. Nothing to sync.");
+                    return;
+                }
+                
+                logMsg(`Found ${queue.length} pending registrations.`);
+
+                const key = await getCryptoKey(secretKeyHex);
+                const newStudents = [];
+                const keysToDelete = [];
+
+                for (const item of queue) {
+                    try {
+                        const data = await decryptPayload(item.payload, key);
+                        newStudents.push(data);
+                        keysToDelete.push(item.key);
+                        logMsg(`Decrypted registration for: ${data.email} (${data.github})`);
+                    } catch (e) {
+                        logMsg(`Failed to decrypt payload ${item.key}. Wrong key?`, true);
+                    }
+                }
+
+                if (newStudents.length === 0) {
+                    throw new Error("No payloads were successfully decrypted.");
+                }
+
+                logMsg(`Fetching GitHub User info...`);
+                const userRes = await fetch('https://api.github.com/user', {
+                    headers: { 'Authorization': `token ${githubToken}`, 'Accept': 'application/vnd.github.v3+json' }
+                });
+                if (!userRes.ok) throw new Error("Failed to fetch user info. Invalid token?");
+                const userData = await userRes.json();
+                const username = userData.login;
+
+                logMsg(`Fetching students.csv from GitHub (${username}/class-repo-tracker)...`);
+                const csvPath = `classes/${classId}/students.csv`;
+                let currentCsv = "";
+                let fileSha = null;
+
+                const ghGetRes = await fetch(`https://api.github.com/repos/${username}/class-repo-tracker/contents/${csvPath}`, {
+                    headers: { 'Authorization': `token ${githubToken}`, 'Accept': 'application/vnd.github.v3+json' }
+                });
+
+                if (ghGetRes.ok) {
+                    const ghData = await ghGetRes.json();
+                    currentCsv = decodeURIComponent(escape(atob(ghData.content)));
+                    fileSha = ghData.sha;
+                } else if (ghGetRes.status === 404) {
+                    logMsg(`students.csv not found. Will create a new one.`);
+                    currentCsv = "Email,GitHub,Template,Timestamp\\n";
+                } else {
+                    throw new Error("Failed to fetch from GitHub: " + await ghGetRes.text());
+                }
+
+                let appendedCsv = currentCsv;
+                if (!appendedCsv.endsWith('\\n')) appendedCsv += '\\n';
+                
+                for (const s of newStudents) {
+                    appendedCsv += `${s.email},${s.github},${s.template},${s.timestamp}\\n`;
+                }
+
+                logMsg(`Pushing updated students.csv to GitHub...`);
+                const encodedCsv = btoa(unescape(encodeURIComponent(appendedCsv)));
+                const body = {
+                    message: `Automated sync: Added ${newStudents.length} students to ${classId}`,
+                    content: encodedCsv
+                };
+                if (fileSha) body.sha = fileSha;
+
+                const ghPutRes = await fetch(`https://api.github.com/repos/${username}/class-repo-tracker/contents/${csvPath}`, {
+                    method: 'PUT',
+                    headers: { 'Authorization': `token ${githubToken}`, 'Accept': 'application/vnd.github.v3+json' },
+                    body: JSON.stringify(body)
+                });
+
+                if (!ghPutRes.ok) throw new Error("Failed to push to GitHub: " + await ghPutRes.text());
+                logMsg(`Successfully pushed to Tracker Repository!`);
+
+                logMsg(`Triggering Automator Workflow...`);
+                const dispatchRes = await fetch(`https://api.github.com/repos/${username}/class-repo-automator/dispatches`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `token ${githubToken}`, 'Accept': 'application/vnd.github.v3+json' },
+                    body: JSON.stringify({ event_type: 'roster_updated', client_payload: { class_id: classId } })
+                });
+
+                if (!dispatchRes.ok) logMsg(`Warning: Failed to trigger automator workflow: ${await dispatchRes.text()}`, true);
+                else logMsg(`✅ Automator workflow triggered successfully!`);
+
+                logMsg(`Cleaning up Cloudflare queue...`);
+                const delRes = await fetch(`${workerUrl}/api/queue/delete`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ keys: keysToDelete })
+                });
+
+                if (!delRes.ok) throw new Error("Failed to delete queue from Cloudflare.");
+                logMsg(`Queue cleanup successful. Sync complete! 🎉`);
+
+            } catch (err) {
+                logMsg(`Error: ${err.message}`, true);
+            }
+        }
+    </script>
+</body>
+</html>

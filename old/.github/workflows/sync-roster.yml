@@ -1,0 +1,65 @@
+name: Sync GitOps Rosters
+
+on:
+  push:
+    paths:
+      - 'classes/**/students.csv'
+  workflow_dispatch:
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate App Token
+        id: generate-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
+
+      - name: Batch Provision Repositories
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          # Find all students.csv files in the classes directory
+          find classes -name "students.csv" -print0 | while IFS= read -r -d '' file; do
+            echo "Processing roster: $file"
+            
+            # Read CSV skipping header
+            tail -n +2 "$file" | while IFS=, read -r email github_handle template timestamp; do
+              # Skip empty lines
+              if [ -z "$github_handle" ]; then continue; fi
+              
+              # Trim whitespace
+              github_handle=$(echo "$github_handle" | xargs)
+              template=$(echo "$template" | xargs)
+              
+              NEW_REPO_NAME="${template}-${github_handle}"
+              
+              echo "Checking $NEW_REPO_NAME..."
+              if gh repo view "${{ github.repository_owner }}/$NEW_REPO_NAME" > /dev/null 2>&1; then
+                echo "  -> Already exists. Skipping."
+              else
+                echo "  -> Creating repository from template $template..."
+                # Sleep briefly to avoid GitHub abuse limits
+                sleep 2
+                
+                gh repo create "${{ github.repository_owner }}/$NEW_REPO_NAME" \
+                  --template "${{ github.repository_owner }}/$template" \
+                  --private
+                  
+                echo "  -> Inviting $github_handle..."
+                gh api \
+                  --method PUT \
+                  -H "Accept: application/vnd.github+json" \
+                  "/repos/${{ github.repository_owner }}/$NEW_REPO_NAME/collaborators/$github_handle" \
+                  -f permission=push
+              fi
+            done
+          done
