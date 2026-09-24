@@ -15,6 +15,9 @@ on:
       target_owner:
         description: 'Target GitHub Organization (optional)'
         required: false
+      add_codespaces:
+        description: 'Add Codespaces button'
+        required: false
 
 permissions:
   contents: write
@@ -43,12 +46,14 @@ jobs:
           ASSIGNMENT_NAME: ${{ github.event.inputs.assignment_name || inputs.assignment_name }}
           OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
           STUDENTS_JSON: ${{ github.event.inputs.students_json || inputs.students_json }}
+          ADD_CODESPACES: ${{ github.event.inputs.add_codespaces || inputs.add_codespaces }}
         run: |
           mkdir -p "logs/$ASSIGNMENT_NAME"
           
           echo "$STUDENTS_JSON" | jq -c '.[]' | while read student; do
             STUDENT_HANDLE=$(echo "$student" | jq -r '.student_handle')
             STUDENT_EMAIL=$(echo "$student" | jq -r '.student_email')
+            STUDENT_NAME=$(echo "$student" | jq -r '.student_name // empty')
             REPO_NAME="${ASSIGNMENT_NAME}-${STUDENT_HANDLE}"
 
             echo "=========================================="
@@ -77,9 +82,30 @@ jobs:
               /repos/$OWNER/$REPO_NAME/collaborators/$STUDENT_HANDLE \
               -f permission="write" || echo "::warning::Invite failed for $STUDENT_HANDLE"
 
+            if [ "$ADD_CODESPACES" == "true" ]; then
+                echo "Adding Codespaces badge to $REPO_NAME..."
+                SHA=$(gh api repos/$OWNER/$REPO_NAME/contents/README.md -q .sha 2>/dev/null || echo "")
+                BADGE="[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/$OWNER/$REPO_NAME)"
+                
+                if [ -z "$SHA" ]; then
+                    CONTENT=$(echo -e "$BADGE" | base64 -w 0)
+                    gh api --method PUT repos/$OWNER/$REPO_NAME/contents/README.md \
+                        -f message="Add Codespaces badge" \
+                        -f content="$CONTENT" || echo "::warning::Failed to create README for $REPO_NAME"
+                else
+                    EXISTING=$(gh api repos/$OWNER/$REPO_NAME/contents/README.md -q .content 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null || echo "")
+                    CONTENT=$(echo -e "$BADGE\n\n$EXISTING" | base64 -w 0)
+                    gh api --method PUT repos/$OWNER/$REPO_NAME/contents/README.md \
+                        -f message="Add Codespaces badge" \
+                        -f content="$CONTENT" \
+                        -f sha="$SHA" || echo "::warning::Failed to update README for $REPO_NAME"
+                fi
+            fi
+
             # 3. Write Log File
             LOG_FILE="logs/$ASSIGNMENT_NAME/$STUDENT_HANDLE.txt"
             echo "github_handle: $STUDENT_HANDLE" > "$LOG_FILE"
+            echo "name: $STUDENT_NAME" >> "$LOG_FILE"
             echo "email: $STUDENT_EMAIL" >> "$LOG_FILE"
             echo "created_at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$LOG_FILE"
             echo "repo: $OWNER/$REPO_NAME" >> "$LOG_FILE"
