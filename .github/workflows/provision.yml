@@ -94,11 +94,15 @@ jobs:
                         -f content="$CONTENT" || echo "::warning::Failed to create README for $REPO_NAME"
                 else
                     EXISTING=$(gh api repos/$OWNER/$REPO_NAME/contents/README.md -q .content 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null || echo "")
-                    CONTENT=$(echo -e "$BADGE\n\n$EXISTING" | base64 -w 0)
-                    gh api --method PUT repos/$OWNER/$REPO_NAME/contents/README.md \
-                        -f message="Add Codespaces badge" \
-                        -f content="$CONTENT" \
-                        -f sha="$SHA" || echo "::warning::Failed to update README for $REPO_NAME"
+                    if ! echo "$EXISTING" | grep -q "codespaces/badge.svg"; then
+                        CONTENT=$(echo -e "$BADGE\n\n$EXISTING" | base64 -w 0)
+                        gh api --method PUT repos/$OWNER/$REPO_NAME/contents/README.md \
+                            -f message="Add Codespaces badge" \
+                            -f content="$CONTENT" \
+                            -f sha="$SHA" || echo "::warning::Failed to update README for $REPO_NAME"
+                    else
+                        echo "Codespaces badge already exists."
+                    fi
                 fi
             fi
 
