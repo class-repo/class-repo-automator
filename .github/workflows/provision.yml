@@ -83,6 +83,10 @@ jobs:
             echo "email: $STUDENT_EMAIL" >> "$LOG_FILE"
             echo "created_at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$LOG_FILE"
             echo "repo: $OWNER/$REPO_NAME" >> "$LOG_FILE"
+
+            # 4. Notify ClassRepo Server that the repo is ready
+            echo "Notifying ClassRepo Server..."
+            curl -X POST "https://class-repo-server.pwlewis.workers.dev/api/ready/$STUDENT_HANDLE" || true
           done
 
           # 4. Commit and Push with Jitter Retry
