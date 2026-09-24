@@ -1,23 +1,17 @@
-name: Provision Student Repository
+name: Provision Student Repositories
 
 on:
-  repository_dispatch:
-    types: [create_repo]
-
   workflow_dispatch:
     inputs:
       template:
         description: 'Template Repo (e.g. owner/repo)'
         required: true
-      repo_name:
-        description: 'New Repo Name (e.g. hw1-student)'
+      assignment_name:
+        description: 'Assignment Name (e.g. hw1)'
         required: true
-      student_handle:
-        description: 'Student GitHub Handle'
+      students_json:
+        description: 'JSON array of students to provision'
         required: true
-      student_email:
-        description: 'Student Email (optional)'
-        required: false
       target_owner:
         description: 'Target GitHub Organization (optional)'
         required: false
@@ -37,61 +31,68 @@ jobs:
           private-key: ${{ secrets.CLASSREPO_APP_PRIVATE_KEY }}
           owner: ${{ github.event.inputs.target_owner || github.repository_owner }}
 
-      - name: Create Repository from Template
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TEMPLATE: ${{ github.event.inputs.template || inputs.template }}
-          REPO_NAME: ${{ github.event.inputs.repo_name || inputs.repo_name }}
-          OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
-        run: |
-          echo "Generating repository $REPO_NAME from template $TEMPLATE in $OWNER..."
-          
-          gh api \
-            --method POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            /repos/$TEMPLATE/generate \
-            -f owner="$OWNER" \
-            -f name="$REPO_NAME" \
-            -F private=true \
-            -F include_all_branches=false
-
-          echo "Waiting for repository creation to complete..."
-          sleep 3
-
-      - name: Invite Student to Repository
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          STUDENT_HANDLE: ${{ github.event.inputs.student_handle || inputs.student_handle }}
-          REPO_NAME: ${{ github.event.inputs.repo_name || inputs.repo_name }}
-          OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
-        run: |
-          echo "Inviting $STUDENT_HANDLE to $REPO_NAME in $OWNER..."
-          
-          gh api \
-            --method PUT \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            /repos/$OWNER/$REPO_NAME/collaborators/$STUDENT_HANDLE \
-            -f permission="write"
-
       - name: Checkout Automator Repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log Student Email Securely
+      - name: Process Students Batch
         env:
-          STUDENT_HANDLE: ${{ github.event.inputs.student_handle || inputs.student_handle }}
-          STUDENT_EMAIL: ${{ github.event.inputs.student_email || inputs.student_email }}
-          REPO_NAME: ${{ github.event.inputs.repo_name || inputs.repo_name }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TEMPLATE: ${{ github.event.inputs.template || inputs.template }}
+          ASSIGNMENT_NAME: ${{ github.event.inputs.assignment_name || inputs.assignment_name }}
+          OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
+          STUDENTS_JSON: ${{ github.event.inputs.students_json || inputs.students_json }}
         run: |
-          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          mkdir -p logs
-          echo "$STUDENT_HANDLE,$STUDENT_EMAIL,$REPO_NAME,$DATE" >> logs/created_repos.csv
+          mkdir -p "logs/$ASSIGNMENT_NAME"
           
+          echo "$STUDENTS_JSON" | jq -c '.[]' | while read student; do
+            STUDENT_HANDLE=$(echo "$student" | jq -r '.student_handle')
+            STUDENT_EMAIL=$(echo "$student" | jq -r '.student_email')
+            REPO_NAME="${ASSIGNMENT_NAME}-${STUDENT_HANDLE}"
+
+            echo "=========================================="
+            echo "Processing $STUDENT_HANDLE -> $REPO_NAME"
+            echo "=========================================="
+            
+            # 1. Create Repository
+            echo "Generating repository $REPO_NAME from template $TEMPLATE in $OWNER..."
+            gh api --method POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              /repos/$TEMPLATE/generate \
+              -f owner="$OWNER" \
+              -f name="$REPO_NAME" \
+              -F private=true \
+              -F include_all_branches=false || echo "::warning::Repo generation failed or already exists for $REPO_NAME"
+
+            echo "Waiting for GitHub to initialize repo..."
+            sleep 3
+
+            # 2. Invite Student
+            echo "Inviting $STUDENT_HANDLE to $REPO_NAME in $OWNER..."
+            gh api --method PUT \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              /repos/$OWNER/$REPO_NAME/collaborators/$STUDENT_HANDLE \
+              -f permission="write" || echo "::warning::Invite failed for $STUDENT_HANDLE"
+
+            # 3. Write Log File
+            LOG_FILE="logs/$ASSIGNMENT_NAME/$STUDENT_HANDLE.txt"
+            echo "github_handle: $STUDENT_HANDLE" > "$LOG_FILE"
+            echo "email: $STUDENT_EMAIL" >> "$LOG_FILE"
+            echo "created_at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$LOG_FILE"
+            echo "repo: $OWNER/$REPO_NAME" >> "$LOG_FILE"
+          done
+
+          # 4. Commit and Push with Jitter Retry
           git config --global user.name "ClassRepo Automator"
           git config --global user.email "automator@classrepo.internal"
-          git add logs/created_repos.csv
-          git commit -m "Log repository creation for $STUDENT_HANDLE" || true
-          git push || true
+          git add logs/
+          git commit -m "Log repository creation for batch" || true
+          
+          for i in {1..5}; do
+            git pull --rebase && git push && break
+            echo "Git push failed, retrying in a few seconds..."
+            sleep $((RANDOM % 5 + 1))
+          done
