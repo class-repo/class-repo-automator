@@ -18,6 +18,9 @@ on:
       add_codespaces:
         description: 'Add Codespaces button'
         required: false
+      server_url:
+        description: 'URL of the server'
+        required: true
 
 permissions:
   contents: write
@@ -116,7 +119,7 @@ jobs:
 
             # 4. Notify ClassRepo Server that the repo is ready
             echo "Notifying ClassRepo Server..."
-            curl -X POST "https://class-repo-server.pwlewis.workers.dev/api/ready/$STUDENT_HANDLE" || true
+            curl -X POST "${{ github.event.inputs.server_url }}/api/ready/$STUDENT_HANDLE" || true
           done
 
           # 4. Commit and Push with Jitter Retry
