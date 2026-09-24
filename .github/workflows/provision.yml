@@ -18,6 +18,9 @@ on:
       student_email:
         description: 'Student Email (optional)'
         required: false
+      target_owner:
+        description: 'Target GitHub Organization (optional)'
+        required: false
 
 permissions:
   contents: write
@@ -32,16 +35,16 @@ jobs:
         with:
           app-id: ${{ secrets.CLASSREPO_APP_ID }}
           private-key: ${{ secrets.CLASSREPO_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
+          owner: ${{ github.event.inputs.target_owner || github.repository_owner }}
 
       - name: Create Repository from Template
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TEMPLATE: ${{ github.event.client_payload.template || inputs.template }}
-          REPO_NAME: ${{ github.event.client_payload.repo_name || inputs.repo_name }}
-          OWNER: ${{ github.repository_owner }}
+          TEMPLATE: ${{ github.event.inputs.template || inputs.template }}
+          REPO_NAME: ${{ github.event.inputs.repo_name || inputs.repo_name }}
+          OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
         run: |
-          echo "Generating repository $REPO_NAME from template $TEMPLATE..."
+          echo "Generating repository $REPO_NAME from template $TEMPLATE in $OWNER..."
           
           gh api \
             --method POST \
@@ -59,11 +62,11 @@ jobs:
       - name: Invite Student to Repository
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          STUDENT_HANDLE: ${{ github.event.client_payload.student_handle || inputs.student_handle }}
-          REPO_NAME: ${{ github.event.client_payload.repo_name || inputs.repo_name }}
-          OWNER: ${{ github.repository_owner }}
+          STUDENT_HANDLE: ${{ github.event.inputs.student_handle || inputs.student_handle }}
+          REPO_NAME: ${{ github.event.inputs.repo_name || inputs.repo_name }}
+          OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
         run: |
-          echo "Inviting $STUDENT_HANDLE to $REPO_NAME..."
+          echo "Inviting $STUDENT_HANDLE to $REPO_NAME in $OWNER..."
           
           gh api \
             --method PUT \
@@ -79,9 +82,9 @@ jobs:
 
       - name: Log Student Email Securely
         env:
-          STUDENT_HANDLE: ${{ github.event.client_payload.student_handle || inputs.student_handle }}
-          STUDENT_EMAIL: ${{ github.event.client_payload.student_email || inputs.student_email }}
-          REPO_NAME: ${{ github.event.client_payload.repo_name || inputs.repo_name }}
+          STUDENT_HANDLE: ${{ github.event.inputs.student_handle || inputs.student_handle }}
+          STUDENT_EMAIL: ${{ github.event.inputs.student_email || inputs.student_email }}
+          REPO_NAME: ${{ github.event.inputs.repo_name || inputs.repo_name }}
         run: |
           DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           mkdir -p logs
@@ -90,5 +93,5 @@ jobs:
           git config --global user.name "ClassRepo Automator"
           git config --global user.email "automator@classrepo.internal"
           git add logs/created_repos.csv
-          git commit -m "Log repository creation for $STUDENT_HANDLE"
-          git push
+          git commit -m "Log repository creation for $STUDENT_HANDLE" || true
+          git push || true
