@@ -109,27 +109,33 @@ jobs:
                 fi
             fi
 
-            # 3. Write Log File
-            LOG_FILE="logs/$ASSIGNMENT_NAME/$STUDENT_HANDLE.txt"
-            echo "github_handle: $STUDENT_HANDLE" > "$LOG_FILE"
-            echo "name: $STUDENT_NAME" >> "$LOG_FILE"
-            echo "email: $STUDENT_EMAIL" >> "$LOG_FILE"
-            echo "created_at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$LOG_FILE"
-            echo "repo: $OWNER/$REPO_NAME" >> "$LOG_FILE"
+            # 3. Write Log File (Only if the Automator repo is PRIVATE)
+            if [ "${{ github.event.repository.private }}" == "true" ]; then
+                LOG_FILE="logs/$ASSIGNMENT_NAME/$STUDENT_HANDLE.txt"
+                echo "github_handle: $STUDENT_HANDLE" > "$LOG_FILE"
+                echo "name: $STUDENT_NAME" >> "$LOG_FILE"
+                echo "email: $STUDENT_EMAIL" >> "$LOG_FILE"
+                echo "created_at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$LOG_FILE"
+                echo "repo: $OWNER/$REPO_NAME" >> "$LOG_FILE"
+                HAS_LOGS="true"
+            else
+                echo "::warning::Automator repository is PUBLIC. Skipping log file for $STUDENT_HANDLE to protect student privacy."
+            fi
 
             # 4. Notify ClassRepo Server that the repo is ready
             echo "Notifying ClassRepo Server..."
             curl -X POST "${{ github.event.inputs.server_url }}/api/ready/$STUDENT_HANDLE" || true
           done
 
-          # 4. Commit and Push with Jitter Retry
-          git config --global user.name "ClassRepo Automator"
-          git config --global user.email "automator@classrepo.internal"
-          git add logs/
-          git commit -m "Log repository creation for batch" || true
-          
-          for i in {1..5}; do
-            git pull --rebase && git push && break
-            echo "Git push failed, retrying in a few seconds..."
-            sleep $((RANDOM % 5 + 1))
-          done
+          if [ "$HAS_LOGS" == "true" ]; then
+            git config --global user.name "ClassRepo Automator"
+            git config --global user.email "automator@classrepo.internal"
+            git add logs/
+            git commit -m "Log repository creation for batch" || true
+            
+            for i in {1..5}; do
+              git pull --rebase && git push && break
+              echo "Git push failed, retrying in a few seconds..."
+              sleep $((RANDOM % 5 + 1))
+            done
+          fi
