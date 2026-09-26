@@ -110,7 +110,8 @@ jobs:
             fi
 
             # 3. Write Log File (Only if the Automator repo is PRIVATE)
-            if [ "${{ github.event.repository.private }}" == "true" ]; then
+            IS_PRIVATE=$(gh api repos/$GITHUB_REPOSITORY -q .private)
+            if [ "$IS_PRIVATE" == "true" ]; then
                 LOG_FILE="logs/$ASSIGNMENT_NAME/$STUDENT_HANDLE.txt"
                 echo "github_handle: $STUDENT_HANDLE" > "$LOG_FILE"
                 echo "name: $STUDENT_NAME" >> "$LOG_FILE"
