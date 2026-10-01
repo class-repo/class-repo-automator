@@ -55,7 +55,7 @@ jobs:
           TEMPLATE: ${{ github.event.inputs.template || inputs.template }}
           ASSIGNMENT_NAME: ${{ github.event.inputs.assignment_name || inputs.assignment_name }}
           OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
-          TRACKING_REPO: ${{ github.event.inputs.tracking_repo || 'class-repo-tracking' }}
+          TRACKING_REPO: ${{ vars.CLASSREPO_TRACKER_NAME || 'class-repo-tracking' }}
           STUDENTS_JSON: ${{ github.event.inputs.students_json || inputs.students_json }}
           ADD_CODESPACES: ${{ github.event.inputs.add_codespaces || inputs.add_codespaces }}
         run: |
