@@ -21,6 +21,9 @@ on:
       server_url:
         description: 'URL of the server'
         required: true
+      shortcode:
+        description: 'Assignment shortcode for KV'
+        required: true
 
 permissions:
   contents: write
@@ -153,7 +156,7 @@ jobs:
 
             # 4. Notify ClassRepo Server that the repo is ready
             echo "Notifying ClassRepo Server..."
-            curl -X POST "${{ github.event.inputs.server_url }}/api/ready/$STUDENT_HANDLE" || true
+            curl -X POST "${{ github.event.inputs.server_url }}/api/ready/${{ github.event.inputs.shortcode }}/$STUDENT_HANDLE" || true
           done
 
           git config --global user.name "ClassRepo Automator"
