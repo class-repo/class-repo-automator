@@ -79,6 +79,14 @@ jobs:
             echo "Processing student assignment (PII redacted from logs)"
             echo "=========================================="
             
+            # 0. Check if already exists
+            EXISTS=$(gh api repos/$OWNER/$REPO_NAME -q .name 2>/dev/null || echo "")
+            if [ "$EXISTS" == "$REPO_NAME" ]; then
+                echo "Repository already exists! Fast-tracking..."
+                curl -X POST "${{ github.event.inputs.server_url }}/api/ready/${{ github.event.inputs.shortcode }}/$STUDENT_HANDLE" || true
+                continue
+            fi
+            
             # 1. Create Repository
             echo "Generating repository from template..."
             gh api --method POST \
