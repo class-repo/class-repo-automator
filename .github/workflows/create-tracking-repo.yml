@@ -1,0 +1,45 @@
+name: Setup Tracking Repository
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_owner:
+        description: 'Target GitHub Organization or Username'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  create-tracking:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Executor App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CLASSREPO_APP_ID }}
+          private-key: ${{ secrets.CLASSREPO_APP_PRIVATE_KEY }}
+          owner: ${{ github.event.inputs.target_owner }}
+
+      - name: Create Tracking Repo
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          OWNER: ${{ github.event.inputs.target_owner }}
+        run: |
+          TRACKING_EXISTS=$(gh api repos/$OWNER/class-repo-tracking -q .name 2>/dev/null || echo "")
+          
+          if [ "$TRACKING_EXISTS" == "class-repo-tracking" ]; then
+              echo "✅ Repository 'class-repo-tracking' already exists in $OWNER!"
+              exit 0
+          fi
+          
+          echo "Creating dedicated tracking repository..."
+          IS_ORG=$(gh api users/$OWNER -q .type)
+          if [ "$IS_ORG" == "Organization" ]; then
+              gh api --method POST /orgs/$OWNER/repos -f name="class-repo-tracking" -F private=true -f description="ClassRepo student tracking logs"
+          else
+              gh api --method POST /user/repos -f name="class-repo-tracking" -F private=true -f description="ClassRepo student tracking logs"
+          fi
+          
+          echo "✅ Successfully created private tracking repository: class-repo-tracking"
