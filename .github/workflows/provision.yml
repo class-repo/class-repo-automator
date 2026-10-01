@@ -79,11 +79,14 @@ jobs:
             echo "Processing student assignment (PII redacted from logs)"
             echo "=========================================="
             
+            # Hash the handle to preserve anonymity in transit/Cloudflare KV
+            HASHED_HANDLE=$(echo -n "$STUDENT_HANDLE" | sha256sum | awk '{print $1}')
+            
             # 0. Check if already exists
             EXISTS=$(gh api repos/$OWNER/$REPO_NAME -q .name 2>/dev/null || echo "")
             if [ "$EXISTS" == "$REPO_NAME" ]; then
                 echo "Repository already exists! Fast-tracking..."
-                curl -X POST "${{ github.event.inputs.server_url }}/api/ready/${{ github.event.inputs.shortcode }}/$STUDENT_HANDLE" || true
+                curl -X POST "${{ github.event.inputs.server_url }}/api/ready/${{ github.event.inputs.shortcode }}/$HASHED_HANDLE" || true
                 continue
             fi
             
@@ -164,7 +167,7 @@ jobs:
 
             # 4. Notify ClassRepo Server that the repo is ready
             echo "Notifying ClassRepo Server..."
-            curl -X POST "${{ github.event.inputs.server_url }}/api/ready/${{ github.event.inputs.shortcode }}/$STUDENT_HANDLE" || true
+            curl -X POST "${{ github.event.inputs.server_url }}/api/ready/${{ github.event.inputs.shortcode }}/$HASHED_HANDLE" || true
           done
 
           git config --global user.name "ClassRepo Automator"
