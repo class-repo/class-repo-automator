@@ -109,18 +109,33 @@ jobs:
                 fi
             fi
 
-            # 3. Write Log File (Only if the Automator repo is PRIVATE)
-            IS_PRIVATE=$(gh api repos/$GITHUB_REPOSITORY -q .private)
-            if [ "$IS_PRIVATE" == "true" ]; then
-                LOG_FILE="logs/$ASSIGNMENT_NAME/$STUDENT_HANDLE.txt"
+            # 3. Write Log File
+            # First, check if a dedicated private tracking repo exists
+            TRACKING_EXISTS=$(gh api repos/$OWNER/class-repo-tracking -q .name 2>/dev/null || echo "")
+            
+            if [ "$TRACKING_EXISTS" == "class-repo-tracking" ]; then
+                mkdir -p "tracking_logs/$ASSIGNMENT_NAME"
+                LOG_FILE="tracking_logs/$ASSIGNMENT_NAME/$STUDENT_HANDLE.txt"
                 echo "github_handle: $STUDENT_HANDLE" > "$LOG_FILE"
                 echo "name: $STUDENT_NAME" >> "$LOG_FILE"
                 echo "email: $STUDENT_EMAIL" >> "$LOG_FILE"
                 echo "created_at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$LOG_FILE"
                 echo "repo: $OWNER/$REPO_NAME" >> "$LOG_FILE"
-                HAS_LOGS="true"
+                HAS_TRACKING_LOGS="true"
             else
-                echo "::warning::Automator repository is PUBLIC. Skipping log file for $STUDENT_HANDLE to protect student privacy."
+                # Fallback to local Automator repo if it's private
+                IS_PRIVATE=$(gh api repos/$GITHUB_REPOSITORY -q .private)
+                if [ "$IS_PRIVATE" == "true" ]; then
+                    LOG_FILE="logs/$ASSIGNMENT_NAME/$STUDENT_HANDLE.txt"
+                    echo "github_handle: $STUDENT_HANDLE" > "$LOG_FILE"
+                    echo "name: $STUDENT_NAME" >> "$LOG_FILE"
+                    echo "email: $STUDENT_EMAIL" >> "$LOG_FILE"
+                    echo "created_at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$LOG_FILE"
+                    echo "repo: $OWNER/$REPO_NAME" >> "$LOG_FILE"
+                    HAS_LOGS="true"
+                else
+                    echo "::warning::No 'class-repo-tracking' repo found, and Automator is PUBLIC. Skipping logs for $STUDENT_HANDLE to protect privacy."
+                fi
             fi
 
             # 4. Notify ClassRepo Server that the repo is ready
@@ -128,9 +143,10 @@ jobs:
             curl -X POST "${{ github.event.inputs.server_url }}/api/ready/$STUDENT_HANDLE" || true
           done
 
+          git config --global user.name "ClassRepo Automator"
+          git config --global user.email "automator@classrepo.internal"
+          
           if [ "$HAS_LOGS" == "true" ]; then
-            git config --global user.name "ClassRepo Automator"
-            git config --global user.email "automator@classrepo.internal"
             git add logs/
             git commit -m "Log repository creation for batch" || true
             
@@ -139,4 +155,21 @@ jobs:
               echo "Git push failed, retrying in a few seconds..."
               sleep $((RANDOM % 5 + 1))
             done
+          fi
+
+          if [ "$HAS_TRACKING_LOGS" == "true" ]; then
+            echo "Pushing logs to dedicated class-repo-tracking repository..."
+            git clone https://x-access-token:$GH_TOKEN@github.com/$OWNER/class-repo-tracking.git tracking_repo_clone
+            mkdir -p tracking_repo_clone/logs/$ASSIGNMENT_NAME
+            cp tracking_logs/$ASSIGNMENT_NAME/* tracking_repo_clone/logs/$ASSIGNMENT_NAME/
+            cd tracking_repo_clone
+            git add logs/
+            git commit -m "Log repository creation for batch" || true
+            
+            for i in {1..5}; do
+              git pull --rebase && git push && break
+              echo "Git push to tracking repo failed, retrying in a few seconds..."
+              sleep $((RANDOM % 5 + 1))
+            done
+            cd ..
           fi

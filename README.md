@@ -9,6 +9,8 @@
 By isolating the execution engine inside the instructor's own GitHub organization, sensitive GitHub App private keys (`.pem`) remain exclusively in GitHub Action Secrets, preserving a strict **zero-trust boundary**.
 
 ---
+### 🔙 [Click here to return to the ClassRepo Setup Wizard](https://class-repo-ui.pwlewis.workers.dev/dashboard)
+---
 
 ## Table of Contents
 
