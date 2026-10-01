@@ -53,6 +53,19 @@ jobs:
         run: |
           mkdir -p "logs/$ASSIGNMENT_NAME"
           
+          # Auto-provision tracking repository if it doesn't exist
+          TRACKING_EXISTS=$(gh api repos/$OWNER/class-repo-tracking -q .name 2>/dev/null || echo "")
+          if [ "$TRACKING_EXISTS" != "class-repo-tracking" ]; then
+              echo "Tracking repository not found. Auto-creating 'class-repo-tracking'..."
+              IS_ORG=$(gh api users/$OWNER -q .type)
+              if [ "$IS_ORG" == "Organization" ]; then
+                  gh api --method POST /orgs/$OWNER/repos -f name="class-repo-tracking" -F private=true -f description="ClassRepo student tracking logs" || true
+              else
+                  gh api --method POST /user/repos -f name="class-repo-tracking" -F private=true -f description="ClassRepo student tracking logs" || true
+              fi
+              sleep 2
+          fi
+          
           echo "$STUDENTS_JSON" | jq -c '.[]' | while read student; do
             STUDENT_HANDLE=$(echo "$student" | jq -r '.student_handle')
             STUDENT_EMAIL=$(echo "$student" | jq -r '.student_email')
