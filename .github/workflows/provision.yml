@@ -145,6 +145,16 @@ jobs:
             # First, check if a dedicated private tracking repo exists
             TRACKING_EXISTS=$(gh api repos/$OWNER/$TRACKING_REPO -q .name 2>/dev/null || echo "")
             
+            if [ "$TRACKING_EXISTS" != "$TRACKING_REPO" ]; then
+                echo "Tracking repo '$TRACKING_REPO' not found. Attempting to create it..."
+                if gh repo create $OWNER/$TRACKING_REPO --private; then
+                    echo "Successfully created tracking repo."
+                    TRACKING_EXISTS="$TRACKING_REPO"
+                else
+                    echo "::warning::Failed to create tracking repo '$TRACKING_REPO'. Will fallback to local Automator repo if private."
+                fi
+            fi
+            
             if [ "$TRACKING_EXISTS" == "$TRACKING_REPO" ]; then
                 mkdir -p "tracking_logs/$ASSIGNMENT_NAME"
                 LOG_FILE="tracking_logs/$ASSIGNMENT_NAME/$STUDENT_HANDLE.txt"
@@ -166,7 +176,7 @@ jobs:
                     echo "repo: $OWNER/$REPO_NAME" >> "$LOG_FILE"
                     HAS_LOGS="true"
                 else
-                    echo "::warning::No '$TRACKING_REPO' repo found, and Automator is PUBLIC. Skipping logs for student to protect privacy."
+                    echo "::warning::No '$TRACKING_REPO' repo found/created, and Automator is PUBLIC. Skipping logs for student to protect privacy."
                 fi
             fi
 
@@ -195,11 +205,24 @@ jobs:
             mkdir -p tracking_repo_clone/logs/$ASSIGNMENT_NAME
             cp tracking_logs/$ASSIGNMENT_NAME/* tracking_repo_clone/logs/$ASSIGNMENT_NAME/
             cd tracking_repo_clone
+            
+            git config user.name "ClassRepo Automator"
+            git config user.email "automator@classrepo.internal"
+            
             git add logs/
             git commit -m "Log repository creation for batch" || true
             
+            # Check if remote branch exists to determine if we can pull/push normally or need to initialize
+            REMOTE_EXISTS=$(git ls-remote --heads origin main 2>/dev/null | wc -l)
+            
             for i in {1..5}; do
-              git pull --rebase && git push && break
+              if [ "$REMOTE_EXISTS" -eq 0 ]; then
+                git branch -M main
+                git push -u origin main && break
+              else
+                git pull --rebase origin main || true
+                git push origin main && break
+              fi
               echo "Git push to tracking repo failed, retrying in a few seconds..."
               sleep $((RANDOM % 5 + 1))
             done
