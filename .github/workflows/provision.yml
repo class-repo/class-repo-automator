@@ -53,19 +53,12 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Process Students Batch
-        if: ${{ github.event.inputs.dry_run != 'true' && inputs.dry_run != 'true' }}
+      - name: Ensure Tracking Repository
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TEMPLATE: ${{ github.event.inputs.template || inputs.template }}
-          ASSIGNMENT_NAME: ${{ github.event.inputs.assignment_name || inputs.assignment_name }}
           OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
           TRACKING_REPO: ${{ vars.CLASSREPO_TRACKER_NAME || 'class-repo-tracking' }}
-          STUDENTS_JSON: ${{ github.event.inputs.students_json || inputs.students_json }}
-          ADD_CODESPACES: ${{ github.event.inputs.add_codespaces || inputs.add_codespaces }}
         run: |
-          mkdir -p "logs/$ASSIGNMENT_NAME"
-          
           # Auto-provision tracking repository if it doesn't exist
           TRACKING_EXISTS=$(gh api repos/$OWNER/$TRACKING_REPO -q .name 2>/dev/null || echo "")
           if [ "$TRACKING_EXISTS" != "$TRACKING_REPO" ]; then
@@ -78,6 +71,19 @@ jobs:
               fi
               sleep 2
           fi
+
+      - name: Process Students Batch
+        if: ${{ github.event.inputs.dry_run != 'true' && inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TEMPLATE: ${{ github.event.inputs.template || inputs.template }}
+          ASSIGNMENT_NAME: ${{ github.event.inputs.assignment_name || inputs.assignment_name }}
+          OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
+          TRACKING_REPO: ${{ vars.CLASSREPO_TRACKER_NAME || 'class-repo-tracking' }}
+          STUDENTS_JSON: ${{ github.event.inputs.students_json || inputs.students_json }}
+          ADD_CODESPACES: ${{ github.event.inputs.add_codespaces || inputs.add_codespaces }}
+        run: |
+          mkdir -p "logs/$ASSIGNMENT_NAME"
           
           echo "$STUDENTS_JSON" | jq -c '.[]' | while read student; do
             STUDENT_HANDLE=$(echo "$student" | jq -r '.student_handle')
@@ -241,6 +247,8 @@ jobs:
         if: ${{ github.event.inputs.dry_run == 'true' || inputs.dry_run == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
+          TRACKING_REPO: ${{ vars.CLASSREPO_TRACKER_NAME || 'class-repo-tracking' }}
         run: |
           echo "Running Diagnostics..."
           
@@ -251,11 +259,19 @@ jobs:
           # Get Installed Orgs
           ORGS_JSON=$(gh api /app/installations -q '[.[] | .account.login]' 2>/dev/null || echo "[]")
           
+          # Check Tracking Repo
+          TRACKING_EXISTS=$(gh api repos/$OWNER/$TRACKING_REPO -q .name 2>/dev/null || echo "")
+          TRACKING_STATUS="Not Found"
+          if [ "$TRACKING_EXISTS" == "$TRACKING_REPO" ]; then
+              TRACKING_STATUS="Created (${OWNER}/${TRACKING_REPO})"
+          fi
+          
           PAYLOAD=$(jq -n \
             --arg name "$EXECUTOR_NAME" \
             --arg perms "$EXECUTOR_PERMS" \
+            --arg tracking "$TRACKING_STATUS" \
             --argjson orgs "$ORGS_JSON" \
-            '{executor_name: $name, executor_perms: $perms, orgs: $orgs}')
+            '{executor_name: $name, executor_perms: $perms, orgs: $orgs, tracking_repo: $tracking}')
             
           echo "Diagnostics Payload: $PAYLOAD"
           curl -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ github.event.inputs.server_url }}/api/ready/system/${{ github.repository_owner }}"
