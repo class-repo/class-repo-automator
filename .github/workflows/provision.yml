@@ -116,6 +116,9 @@ jobs:
               -H "X-GitHub-Api-Version: 2022-11-28" \
               /repos/$OWNER/$REPO_NAME/collaborators/$STUDENT_HANDLE \
               -f permission="write" || echo "::warning::Invite failed for student"
+              
+            echo "Adding classrepo topics for searchability..."
+            gh repo edit $OWNER/$REPO_NAME --add-topic "classrepo" || true
 
             if [ "$ADD_CODESPACES" == "true" ]; then
                 echo "Adding Codespaces badge..."
