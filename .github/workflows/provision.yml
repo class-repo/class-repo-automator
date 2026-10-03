@@ -28,6 +28,10 @@ on:
       shortcode:
         description: 'Assignment shortcode for KV'
         required: true
+      dry_run:
+        description: 'Run diagnostics instead of provisioning'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -50,6 +54,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Process Students Batch
+        if: ${{ github.event.inputs.dry_run != 'true' && inputs.dry_run != 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TEMPLATE: ${{ github.event.inputs.template || inputs.template }}
@@ -231,3 +236,26 @@ jobs:
             done
             cd ..
           fi
+
+      - name: Run Diagnostics
+        if: ${{ github.event.inputs.dry_run == 'true' || inputs.dry_run == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          echo "Running Diagnostics..."
+          
+          # Get Executor App Details
+          EXECUTOR_NAME=$(gh api /app -q .name 2>/dev/null || echo "Unknown App")
+          EXECUTOR_PERMS=$(gh api /app -q '.permissions | to_entries | map("\(.key): \(.value)") | join(", ")' 2>/dev/null || echo "Unknown")
+          
+          # Get Installed Orgs
+          ORGS_JSON=$(gh api /app/installations -q '[.[] | .account.login]' 2>/dev/null || echo "[]")
+          
+          PAYLOAD=$(jq -n \
+            --arg name "$EXECUTOR_NAME" \
+            --arg perms "$EXECUTOR_PERMS" \
+            --argjson orgs "$ORGS_JSON" \
+            '{executor_name: $name, executor_perms: $perms, orgs: $orgs}')
+            
+          echo "Diagnostics Payload: $PAYLOAD"
+          curl -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ github.event.inputs.server_url }}/api/ready/system/${{ github.repository_owner }}"
