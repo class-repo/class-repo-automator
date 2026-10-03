@@ -158,18 +158,20 @@ jobs:
             # 3. Write Log File
             # First, check if a dedicated private tracking repo exists
             TRACKING_EXISTS=$(gh api repos/$OWNER/$TRACKING_REPO -q .name 2>/dev/null || echo "")
+            TRACKING_IS_PRIVATE=$(gh api repos/$OWNER/$TRACKING_REPO -q .private 2>/dev/null || echo "false")
             
             if [ "$TRACKING_EXISTS" != "$TRACKING_REPO" ]; then
                 echo "Tracking repo '$TRACKING_REPO' not found. Attempting to create it..."
                 if gh repo create $OWNER/$TRACKING_REPO --private; then
                     echo "Successfully created tracking repo."
                     TRACKING_EXISTS="$TRACKING_REPO"
+                    TRACKING_IS_PRIVATE="true"
                 else
                     echo "::warning::Failed to create tracking repo '$TRACKING_REPO'. Will fallback to local Automator repo if private."
                 fi
             fi
             
-            if [ "$TRACKING_EXISTS" == "$TRACKING_REPO" ]; then
+            if [ "$TRACKING_EXISTS" == "$TRACKING_REPO" ] && [ "$TRACKING_IS_PRIVATE" == "true" ]; then
                 mkdir -p "tracking_logs/$ASSIGNMENT_NAME"
                 LOG_FILE="tracking_logs/$ASSIGNMENT_NAME/$STUDENT_HANDLE.txt"
                 echo "github_handle: $STUDENT_HANDLE" > "$LOG_FILE"
@@ -178,6 +180,8 @@ jobs:
                 echo "created_at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$LOG_FILE"
                 echo "repo: $OWNER/$REPO_NAME" >> "$LOG_FILE"
                 HAS_TRACKING_LOGS="true"
+            elif [ "$TRACKING_EXISTS" == "$TRACKING_REPO" ] && [ "$TRACKING_IS_PRIVATE" == "false" ]; then
+                echo "::warning::Tracking repo '$TRACKING_REPO' is PUBLIC! Refusing to write student data to it to protect privacy."
             else
                 # Fallback to local Automator repo if it's private
                 IS_PRIVATE=$(gh api repos/$GITHUB_REPOSITORY -q .private)
@@ -220,11 +224,27 @@ jobs:
             cp tracking_logs/$ASSIGNMENT_NAME/* tracking_repo_clone/logs/$ASSIGNMENT_NAME/
             cd tracking_repo_clone
             
+            # Generate Markdown Dashboard
+            echo "# Student Repository Dashboard" > logs/$ASSIGNMENT_NAME/README.md
+            echo "| GitHub Handle | Name | Email | Repository | Created At |" >> logs/$ASSIGNMENT_NAME/README.md
+            echo "|---------------|------|-------|------------|------------|" >> logs/$ASSIGNMENT_NAME/README.md
+            
+            for file in logs/$ASSIGNMENT_NAME/*.txt; do
+              if [ -f "$file" ]; then
+                HANDLE=$(grep "github_handle:" "$file" | cut -d' ' -f2-)
+                SNAME=$(grep "name:" "$file" | cut -d' ' -f2-)
+                SEMAIL=$(grep "email:" "$file" | cut -d' ' -f2-)
+                SREPO=$(grep "repo:" "$file" | cut -d' ' -f2-)
+                SCREATED=$(grep "created_at:" "$file" | cut -d' ' -f2-)
+                echo "| [@$HANDLE](https://github.com/$HANDLE) | $SNAME | $SEMAIL | [$SREPO](https://github.com/$SREPO) | $SCREATED |" >> logs/$ASSIGNMENT_NAME/README.md
+              fi
+            done
+            
             git config user.name "ClassRepo Automator"
             git config user.email "automator@classrepo.internal"
             
             git add logs/
-            git commit -m "Log repository creation for batch" || true
+            git commit -m "Log repository creation and update dashboard for batch" || true
             
             # Check if remote branch exists to determine if we can pull/push normally or need to initialize
             REMOTE_EXISTS=$(git ls-remote --heads origin main 2>/dev/null | wc -l)
