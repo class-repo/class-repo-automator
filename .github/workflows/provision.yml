@@ -164,6 +164,7 @@ jobs:
                 echo "Tracking repo '$TRACKING_REPO' not found. Attempting to create it..."
                 if gh repo create $OWNER/$TRACKING_REPO --private; then
                     echo "Successfully created tracking repo."
+                    gh repo edit $OWNER/$TRACKING_REPO --add-topic "classrepo-tracking" || true
                     TRACKING_EXISTS="$TRACKING_REPO"
                     TRACKING_IS_PRIVATE="true"
                 else
