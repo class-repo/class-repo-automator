@@ -220,7 +220,7 @@ jobs:
             if [ "$ADD_CODESPACES" == "true" ]; then
                 echo "Adding Codespaces badge..."
                 SHA=$(gh api repos/$OWNER/$REPO_NAME/contents/README.md -q .sha 2>/dev/null || echo "")
-                BADGE="[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/$OWNER/$REPO_NAME)"
+                BADGE="[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/$OWNER/$REPO_NAME?quickstart=1)"
                 
                 if [ -z "$SHA" ]; then
                     CONTENT=$(echo -e "$BADGE" | base64 -w 0)
