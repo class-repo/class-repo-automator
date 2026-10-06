@@ -3,38 +3,19 @@ name: Provision Student Repositories
 on:
   workflow_dispatch:
     inputs:
-      template:
-        description: 'Template Repo (e.g. owner/repo)'
+      payload:
+        description: 'JSON payload containing template, assignment_name, students array, etc.'
         required: true
-      assignment_name:
-        description: 'Assignment Name (e.g. hw1)'
-        required: true
-      students_json:
-        description: 'JSON array of students to provision'
-        required: true
-      target_owner:
-        description: 'Target GitHub Organization (optional)'
-        required: false
-      tracking_repo:
-        description: 'Tracking Repository Name'
-        required: false
-        default: 'class-repo-tracking'
-      add_codespaces:
-        description: 'Add Codespaces button'
-        required: false
       server_url:
-        description: 'URL of the server'
+        description: 'URL of the ClassRepo Server'
         required: true
       shortcode:
-        description: 'Assignment shortcode for KV'
+        description: 'Assignment shortcode for KV API updates'
         required: true
       dry_run:
         description: 'Run diagnostics instead of provisioning'
         required: false
         default: 'false'
-      payload:
-        description: 'JSON payload for advanced routing and inputs'
-        required: false
 
 permissions:
   contents: write
@@ -83,15 +64,14 @@ jobs:
         if: ${{ github.event.inputs.dry_run != 'true' && inputs.dry_run != 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TEMPLATE: ${{ github.event.inputs.template || inputs.template }}
-          ASSIGNMENT_NAME: ${{ github.event.inputs.assignment_name || inputs.assignment_name }}
-          OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
           TRACKING_REPO: ${{ vars.CLASSREPO_TRACKER_NAME || 'class-repo-tracking' }}
-          STUDENTS_JSON: ${{ github.event.inputs.students_json || inputs.students_json }}
-          ADD_CODESPACES: ${{ github.event.inputs.add_codespaces || inputs.add_codespaces }}
           PAYLOAD: ${{ github.event.inputs.payload || inputs.payload }}
         run: |
           MODE=$(echo "$PAYLOAD" | jq -r '.mode // "student_join"')
+          TEMPLATE=$(echo "$PAYLOAD" | jq -r '.template // empty')
+          ASSIGNMENT_NAME=$(echo "$PAYLOAD" | jq -r '.assignment_name // empty')
+          OWNER=$(echo "$PAYLOAD" | jq -r '.target_owner // empty')
+          ADD_CODESPACES=$(echo "$PAYLOAD" | jq -r '.add_codespaces // empty')
           
           if [ "$MODE" == "create_snapshot" ]; then
             echo "Creating Reference Snapshot from Template..."
@@ -166,15 +146,15 @@ jobs:
         if: ${{ github.event.inputs.dry_run != 'true' && inputs.dry_run != 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TEMPLATE: ${{ github.event.inputs.template || inputs.template }}
-          ASSIGNMENT_NAME: ${{ github.event.inputs.assignment_name || inputs.assignment_name }}
-          OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
           TRACKING_REPO: ${{ vars.CLASSREPO_TRACKER_NAME || 'class-repo-tracking' }}
-          STUDENTS_JSON: ${{ github.event.inputs.students_json || inputs.students_json }}
-          ADD_CODESPACES: ${{ github.event.inputs.add_codespaces || inputs.add_codespaces }}
           PAYLOAD: ${{ github.event.inputs.payload || inputs.payload }}
         run: |
           MODE=$(echo "$PAYLOAD" | jq -r '.mode // "student_join"')
+          TEMPLATE=$(echo "$PAYLOAD" | jq -r '.template // empty')
+          ASSIGNMENT_NAME=$(echo "$PAYLOAD" | jq -r '.assignment_name // empty')
+          OWNER=$(echo "$PAYLOAD" | jq -r '.target_owner // empty')
+          ADD_CODESPACES=$(echo "$PAYLOAD" | jq -r '.add_codespaces // empty')
+          
           if [ "$MODE" == "create_snapshot" ]; then
               # Already handled above
               exit 0
