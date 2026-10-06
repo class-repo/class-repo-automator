@@ -24,355 +24,283 @@ jobs:
   provision:
     runs-on: ubuntu-latest
     steps:
+      - name: Parse Payload & Setup Env
+        id: setup
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const payload = JSON.parse(context.payload.inputs.payload);
+            const mode = payload.mode || "student_join";
+            core.setOutput('mode', mode);
+            core.setOutput('template', payload.template || "");
+            core.setOutput('assignment_name', payload.assignment_name || "");
+            core.setOutput('owner', payload.target_owner || context.repo.owner);
+            core.setOutput('add_codespaces', payload.add_codespaces || "false");
+            core.setOutput('shortcode', payload.shortcode || context.payload.inputs.shortcode);
+            core.setOutput('callback_url', payload.callback_url || "");
+
       - name: Generate Executor App Token
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.CLASSREPO_APP_ID }}
           private-key: ${{ secrets.CLASSREPO_APP_PRIVATE_KEY }}
-          owner: ${{ github.event.inputs.target_owner || github.repository_owner }}
+          owner: ${{ steps.setup.outputs.owner }}
 
       - name: Checkout Automator Repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Ensure Tracking Repository
+      - name: Create Snapshot Reference (Bash)
+        if: ${{ steps.setup.outputs.mode == 'create_snapshot' && github.event.inputs.dry_run != 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
-          TRACKING_REPO: ${{ vars.CLASSREPO_TRACKER_NAME || 'class-repo-tracking' }}
+          TEMPLATE: ${{ steps.setup.outputs.template }}
+          ASSIGNMENT_NAME: ${{ steps.setup.outputs.assignment_name }}
+          OWNER: ${{ steps.setup.outputs.owner }}
+          SHORTCODE: ${{ steps.setup.outputs.shortcode }}
+          CALLBACK_URL: ${{ steps.setup.outputs.callback_url }}
         run: |
-          # Auto-provision tracking repository if it doesn't exist
-          TRACKING_EXISTS=$(gh api repos/$OWNER/$TRACKING_REPO -q .name 2>/dev/null || echo "")
-          if [ "$TRACKING_EXISTS" != "$TRACKING_REPO" ]; then
-              echo "Tracking repository not found. Auto-creating '$TRACKING_REPO'..."
-              IS_ORG=$(gh api users/$OWNER -q .type)
-              if [ "$IS_ORG" == "Organization" ]; then
-                  gh repo create $OWNER/$TRACKING_REPO --private --description "ClassRepo Tracking Data"
-              else
-                  gh repo create $TRACKING_REPO --private --description "ClassRepo Tracking Data"
-              fi
-              # Initialize with empty readme
-              echo "# ClassRepo Tracking Data" > README.md
-              gh api -X PUT repos/$OWNER/$TRACKING_REPO/contents/README.md \
-                -f message="Initial commit" \
-                -f content=$(echo -n "# ClassRepo Tracking Data" | base64) || true
-          fi
-
-      - name: Create Snapshot Reference (create_snapshot)
-        if: ${{ github.event.inputs.dry_run != 'true' && inputs.dry_run != 'true' }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TRACKING_REPO: ${{ vars.CLASSREPO_TRACKER_NAME || 'class-repo-tracking' }}
-          PAYLOAD: ${{ github.event.inputs.payload || inputs.payload }}
-        run: |
-          MODE=$(echo "$PAYLOAD" | jq -r '.mode // "student_join"')
-          TEMPLATE=$(echo "$PAYLOAD" | jq -r '.template // empty')
-          ASSIGNMENT_NAME=$(echo "$PAYLOAD" | jq -r '.assignment_name // empty')
-          OWNER=$(echo "$PAYLOAD" | jq -r '.target_owner // empty')
-          ADD_CODESPACES=$(echo "$PAYLOAD" | jq -r '.add_codespaces // empty')
+          echo "Creating Reference Snapshot from Template..."
+          SNAPSHOT_REPO="${ASSIGNMENT_NAME}-snapshot-${SHORTCODE}"
           
-          if [ "$MODE" == "create_snapshot" ]; then
-            echo "Creating Reference Snapshot from Template..."
-            
-            # The backend passes a special shortcode format for snapshots:
-            SHORTCODE=$(echo "$PAYLOAD" | jq -r '.shortcode // empty')
-            if [ -z "$SHORTCODE" ]; then
-                SHORTCODE="${{ github.event.inputs.shortcode }}"
-            fi
-            
-            # 1. Target Snapshot Repo Name
-            SNAPSHOT_REPO="${ASSIGNMENT_NAME}-snapshot-${SHORTCODE}"
-            
-            # 2. Check if snapshot already exists
-            EXISTS=$(gh api repos/$OWNER/$SNAPSHOT_REPO -q .name 2>/dev/null || echo "")
-            if [ "$EXISTS" == "$SNAPSHOT_REPO" ]; then
-                echo "::warning::Snapshot repository '$SNAPSHOT_REPO' already exists! Aborting snapshot creation."
-                exit 0
-            fi
-            
-            # 3. Clone original template (bare clone to get all branches, but we'll strip history)
-            echo "Cloning original template $TEMPLATE..."
-            git clone --depth 1 "https://x-access-token:$GH_TOKEN@github.com/$TEMPLATE.git" snapshot_temp
-            cd snapshot_temp
-            
-            # Remove existing git history to prevent cheating/leaking past solutions
-            rm -rf .git
-            git init
-            git config --local user.name "ClassRepo Automator"
-            git config --local user.email "automator@classrepo.internal"
-            
-            # 4. Inject attribution/README changes if necessary (Optional)
-            echo "" >> README.md
-            echo "---" >> README.md
-            echo "*Snapshot created automatically by ClassRepo Automator for assignment $ASSIGNMENT_NAME*" >> README.md
-            
-            git add .
-            git commit -m "Initial snapshot commit from $TEMPLATE"
-            
-            # 5. Create new snapshot repository as a TEMPLATE in the org
-            echo "Creating snapshot repository $OWNER/$SNAPSHOT_REPO..."
-            gh repo create "$OWNER/$SNAPSHOT_REPO" --private --template --description "Reference snapshot for assignment $ASSIGNMENT_NAME"
-            
-            # 6. Push to new snapshot repository
-            git remote add origin "https://x-access-token:$GH_TOKEN@github.com/$OWNER/$SNAPSHOT_REPO.git"
-            
-            for i in {1..5}; do
-                git push -u origin main && break
-                echo "Git push failed, retrying in a few seconds..."
-                sleep $((RANDOM % 5 + 1))
-            done
-            cd ..
-            
-            # 7. Notify server via Webhook Callback
-            CALLBACK_URL=$(echo "$PAYLOAD" | jq -r '.callback_url // empty')
-            if [ -n "$CALLBACK_URL" ] && [ "$CALLBACK_URL" != "null" ]; then
-                echo "Notifying Server that snapshot is ready..."
-                curl -X POST "$CALLBACK_URL" \
-                     -H "Content-Type: application/json" \
-                     -d "{\"status\": \"success\", \"snapshot_repo\": \"$OWNER/$SNAPSHOT_REPO\"}"
-            else
-                # Fallback to old ready endpoint
-                echo "No callback URL provided, falling back to legacy ready endpoint..."
-                curl -X POST "${{ github.event.inputs.server_url }}/api/ready/${{ github.event.inputs.shortcode }}/$HASHED_REPO" || true
-            fi
-            
-            echo "Snapshot creation complete!"
-            exit 0
-          fi
-
-      - name: Provision Repositories (student_join)
-        if: ${{ github.event.inputs.dry_run != 'true' && inputs.dry_run != 'true' }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TRACKING_REPO: ${{ vars.CLASSREPO_TRACKER_NAME || 'class-repo-tracking' }}
-          PAYLOAD: ${{ github.event.inputs.payload || inputs.payload }}
-        run: |
-          MODE=$(echo "$PAYLOAD" | jq -r '.mode // "student_join"')
-          TEMPLATE=$(echo "$PAYLOAD" | jq -r '.template // empty')
-          ASSIGNMENT_NAME=$(echo "$PAYLOAD" | jq -r '.assignment_name // empty')
-          OWNER=$(echo "$PAYLOAD" | jq -r '.target_owner // empty')
-          ADD_CODESPACES=$(echo "$PAYLOAD" | jq -r '.add_codespaces // empty')
-          
-          if [ "$MODE" == "create_snapshot" ]; then
-              # Already handled above
+          EXISTS=$(gh api repos/$OWNER/$SNAPSHOT_REPO -q .name 2>/dev/null || echo "")
+          if [ "$EXISTS" == "$SNAPSHOT_REPO" ]; then
+              echo "::warning::Snapshot repository '$SNAPSHOT_REPO' already exists! Aborting snapshot creation."
               exit 0
           fi
           
-          # Proceed with student_join logic
-          STUDENTS_ARRAY=$STUDENTS_JSON
-          if [ -n "$PAYLOAD" ] && [ "$PAYLOAD" != "null" ]; then
-              STUDENTS_ARRAY=$(echo "$PAYLOAD" | jq -c '.students // []')
-          fi
+          echo "Cloning original template $TEMPLATE..."
+          git clone --depth 1 "https://x-access-token:$GH_TOKEN@github.com/$TEMPLATE.git" snapshot_temp
+          cd snapshot_temp
           
-          echo "Processing $STUDENTS_ARRAY"
-          HAS_LOGS="false"
-          HAS_TRACKING_LOGS="false"
-
-          for row in $(echo "${STUDENTS_ARRAY}" | jq -r '.[] | @base64'); do
-            _jq() {
-             echo ${row} | base64 --decode | jq -r "${1}"
-            }
-            
-            STUDENT_HANDLE=$(_jq '.github')
-            STUDENT_NAME=$(_jq '.name')
-            STUDENT_EMAIL=$(_jq '.email')
-            HASHED_REPO=$(_jq '.hashed_repo_name // empty')
-
-            if [ -z "$HASHED_REPO" ] || [ "$HASHED_REPO" == "null" ]; then
-                REPO_NAME="${ASSIGNMENT_NAME}-${STUDENT_HANDLE}"
-            else
-                REPO_NAME="$HASHED_REPO"
-            fi
-            
-            echo "Processing student $STUDENT_HANDLE -> $REPO_NAME"
-
-            # 1. Check if repo already exists
-            EXISTS=$(gh api repos/$OWNER/$REPO_NAME -q .name 2>/dev/null || echo "")
-            if [ "$EXISTS" == "$REPO_NAME" ]; then
-                echo "Repository $REPO_NAME already exists! Skipping creation."
-                # We still want to make sure the server knows it's ready, just in case
-                curl -X POST "${{ github.event.inputs.server_url }}/api/ready/${{ github.event.inputs.shortcode }}/$HASHED_REPO" || true
-                continue
-            fi
-
-            # 2. Create Repository from Template
-            echo "Creating repository $OWNER/$REPO_NAME from template $TEMPLATE"
-            if ! gh repo create $OWNER/$REPO_NAME --template $TEMPLATE --private; then
-                echo "::error::Failed to create repository $REPO_NAME"
-                continue
-            fi
-
-            # Grant the student admin access so they can accept codespaces and push
-            echo "Inviting $STUDENT_HANDLE to $REPO_NAME..."
-            gh api -X PUT repos/$OWNER/$REPO_NAME/collaborators/$STUDENT_HANDLE -f permission=admin || echo "::warning::Failed to invite $STUDENT_HANDLE"
-
-            if [ "$ADD_CODESPACES" == "true" ]; then
-                echo "Adding Codespaces badge..."
-                SHA=$(gh api repos/$OWNER/$REPO_NAME/contents/README.md -q .sha 2>/dev/null || echo "")
-                BADGE="[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/$OWNER/$REPO_NAME?quickstart=1)"
-                
-                if [ -z "$SHA" ]; then
-                    CONTENT=$(echo -e "$BADGE" | base64 -w 0)
-                    gh api -X PUT repos/$OWNER/$REPO_NAME/contents/README.md \
-                        -f message="Initial commit: Add Codespaces badge" \
-                        -f content="$CONTENT" || echo "::warning::Failed to create README"
-                else
-                    CURRENT_CONTENT=$(gh api repos/$OWNER/$REPO_NAME/contents/README.md -q .content | base64 --decode 2>/dev/null || echo "")
-                    
-                    if [[ "$CURRENT_CONTENT" != *"$BADGE"* ]]; then
-                        NEW_CONTENT=$(echo -e "$BADGE\n\n$CURRENT_CONTENT")
-                        CONTENT=$(echo -n "$NEW_CONTENT" | base64 -w 0)
-                        
-                        gh api -X PUT repos/$OWNER/$REPO_NAME/contents/README.md \
-                            -f message="Add Codespaces badge" \
-                            -f content="$CONTENT" \
-                            -f sha="$SHA" || echo "::warning::Failed to update README"
-                    else
-                        echo "Codespaces badge already exists."
-                    fi
-                fi
-            fi
-
-            # 3. Write Log File
-            # First, check if a dedicated private tracking repo exists
-            TRACKING_EXISTS=$(gh api repos/$OWNER/$TRACKING_REPO -q .name 2>/dev/null || echo "")
-            TRACKING_IS_PRIVATE=$(gh api repos/$OWNER/$TRACKING_REPO -q .private 2>/dev/null || echo "false")
-            
-            if [ "$TRACKING_EXISTS" != "$TRACKING_REPO" ]; then
-                echo "Tracking repo '$TRACKING_REPO' not found. Attempting to create it..."
-                if gh repo create $OWNER/$TRACKING_REPO --private; then
-                    echo "Successfully created tracking repo."
-                    gh repo edit $OWNER/$TRACKING_REPO --add-topic "classrepo-tracking" || true
-                    TRACKING_EXISTS="$TRACKING_REPO"
-                    TRACKING_IS_PRIVATE="true"
-                else
-                    echo "::warning::Failed to create tracking repo '$TRACKING_REPO'. Will fallback to local Automator repo if private."
-                fi
-            fi
-            
-            if [ "$TRACKING_EXISTS" == "$TRACKING_REPO" ] && [ "$TRACKING_IS_PRIVATE" == "true" ]; then
-                mkdir -p "tracking_logs/$ASSIGNMENT_NAME"
-                LOG_FILE="tracking_logs/$ASSIGNMENT_NAME/$STUDENT_HANDLE.txt"
-                echo "github_handle: $STUDENT_HANDLE" > "$LOG_FILE"
-                echo "name: $STUDENT_NAME" >> "$LOG_FILE"
-                echo "email: $STUDENT_EMAIL" >> "$LOG_FILE"
-                echo "created_at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$LOG_FILE"
-                echo "repo: $OWNER/$REPO_NAME" >> "$LOG_FILE"
-                HAS_TRACKING_LOGS="true"
-            elif [ "$TRACKING_EXISTS" == "$TRACKING_REPO" ] && [ "$TRACKING_IS_PRIVATE" == "false" ]; then
-                echo "::warning::Tracking repo '$TRACKING_REPO' is PUBLIC! Refusing to write student data to it to protect privacy."
-            else
-                # Fallback to local Automator repo if it's private
-                IS_PRIVATE=$(gh api repos/$GITHUB_REPOSITORY -q .private)
-                if [ "$IS_PRIVATE" == "true" ]; then
-                    LOG_FILE="logs/$ASSIGNMENT_NAME/$STUDENT_HANDLE.txt"
-                    echo "github_handle: $STUDENT_HANDLE" > "$LOG_FILE"
-                    echo "name: $STUDENT_NAME" >> "$LOG_FILE"
-                    echo "email: $STUDENT_EMAIL" >> "$LOG_FILE"
-                    echo "created_at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$LOG_FILE"
-                    echo "repo: $OWNER/$REPO_NAME" >> "$LOG_FILE"
-                    HAS_LOGS="true"
-                else
-                    echo "::warning::No '$TRACKING_REPO' repo found/created, and Automator is PUBLIC. Skipping logs for student to protect privacy."
-                fi
-            fi
-
-            # 4. Notify ClassRepo Server that the repo is ready
-            echo "Notifying ClassRepo Server..."
-            curl -X POST "${{ github.event.inputs.server_url }}/api/ready/${{ github.event.inputs.shortcode }}/$HASHED_REPO" || true
-          done
-
-          git config --global user.name "ClassRepo Automator"
-          git config --global user.email "automator@classrepo.internal"
+          rm -rf .git
+          git init
+          git config --local user.name "ClassRepo Automator"
+          git config --local user.email "automator@classrepo.internal"
           
-          if [ "$HAS_LOGS" == "true" ]; then
-            git add logs/
-            git commit -m "Log repository creation for batch" || true
-            
-            for i in {1..5}; do
-              git pull --rebase && git push && break
+          echo "" >> README.md
+          echo "---" >> README.md
+          echo "*Snapshot created automatically by ClassRepo Automator for assignment $ASSIGNMENT_NAME*" >> README.md
+          
+          git add .
+          git commit -m "Initial snapshot commit from $TEMPLATE"
+          
+          echo "Creating snapshot repository $OWNER/$SNAPSHOT_REPO..."
+          gh repo create "$OWNER/$SNAPSHOT_REPO" --private --template --description "Reference snapshot for assignment $ASSIGNMENT_NAME"
+          
+          git remote add origin "https://x-access-token:$GH_TOKEN@github.com/$OWNER/$SNAPSHOT_REPO.git"
+          
+          for i in {1..5}; do
+              git push -u origin main && break
               echo "Git push failed, retrying in a few seconds..."
               sleep $((RANDOM % 5 + 1))
-            done
+          done
+          cd ..
+          
+          if [ -n "$CALLBACK_URL" ] && [ "$CALLBACK_URL" != "null" ]; then
+              echo "Notifying Server that snapshot is ready..."
+              curl -X POST "$CALLBACK_URL" -H "Content-Type: application/json" -d "{\"status\": \"success\", \"snapshot_repo\": \"$OWNER/$SNAPSHOT_REPO\"}"
           fi
 
-          if [ "$HAS_TRACKING_LOGS" == "true" ]; then
-            echo "Pushing logs to dedicated $TRACKING_REPO repository..."
-            git clone https://x-access-token:$GH_TOKEN@github.com/$OWNER/$TRACKING_REPO.git tracking_repo_clone
-            mkdir -p tracking_repo_clone/logs/$ASSIGNMENT_NAME
-            cp tracking_logs/$ASSIGNMENT_NAME/* tracking_repo_clone/logs/$ASSIGNMENT_NAME/
-            cd tracking_repo_clone
+      - name: Provision Student Repositories (JavaScript API)
+        if: ${{ steps.setup.outputs.mode == 'student_join' && github.event.inputs.dry_run != 'true' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const payload = JSON.parse(context.payload.inputs.payload);
+            const students = payload.students || [];
             
-            # Generate Markdown Dashboard
-            echo "# Student Repository Dashboard" > logs/$ASSIGNMENT_NAME/README.md
-            echo "| GitHub Handle | Name | Email | Repository | Created At |" >> logs/$ASSIGNMENT_NAME/README.md
-            echo "|---------------|------|-------|------------|------------|" >> logs/$ASSIGNMENT_NAME/README.md
+            const owner = '${{ steps.setup.outputs.owner }}';
+            const template = '${{ steps.setup.outputs.template }}';
+            const assignmentName = '${{ steps.setup.outputs.assignment_name }}';
+            const addCodespaces = '${{ steps.setup.outputs.add_codespaces }}' === 'true';
+            const serverUrl = context.payload.inputs.server_url;
+            const shortcode = context.payload.inputs.shortcode;
             
-            for file in logs/$ASSIGNMENT_NAME/*.txt; do
-              if [ -f "$file" ]; then
-                HANDLE=$(grep "github_handle:" "$file" | cut -d' ' -f2-)
-                SNAME=$(grep "name:" "$file" | cut -d' ' -f2-)
-                SEMAIL=$(grep "email:" "$file" | cut -d' ' -f2-)
-                SREPO=$(grep "repo:" "$file" | cut -d' ' -f2-)
-                SCREATED=$(grep "created_at:" "$file" | cut -d' ' -f2-)
-                echo "| [@$HANDLE](https://github.com/$HANDLE) | $SNAME | $SEMAIL | [$SREPO](https://github.com/$SREPO) | $SCREATED |" >> logs/$ASSIGNMENT_NAME/README.md
-              fi
-            done
+            const [templateOwner, templateRepo] = template.split('/');
             
-            git config user.name "ClassRepo Automator"
-            git config user.email "automator@classrepo.internal"
+            // Prepare logs directory
+            const logDir = path.join(process.env.GITHUB_WORKSPACE, 'logs_generated');
+            fs.mkdirSync(logDir, { recursive: true });
             
-            git add logs/
-            git commit -m "Log repository creation and update dashboard for batch" || true
+            for (const student of students) {
+              const githubHandle = student.github || student.student_handle;
+              if (!githubHandle) continue;
+              
+              const hashedRepo = student.hashed_repo_name;
+              const repoName = hashedRepo || `${assignmentName}-${githubHandle}`;
+              console.log(`Processing student ${githubHandle} -> ${repoName}`);
+              
+              let exists = false;
+              try {
+                await github.rest.repos.get({ owner, repo: repoName });
+                exists = true;
+                console.log(`Repository ${repoName} already exists! Skipping creation.`);
+              } catch (e) {
+                if (e.status !== 404) {
+                  console.error(`Error checking repo: ${e.message}`);
+                  continue;
+                }
+              }
+              
+              if (!exists) {
+                console.log(`Creating repository ${owner}/${repoName} from template ${template}`);
+                try {
+                  await github.rest.repos.createUsingTemplate({
+                    template_owner: templateOwner,
+                    template_repo: templateRepo,
+                    owner: owner,
+                    name: repoName,
+                    private: true,
+                    include_all_branches: false
+                  });
+                } catch (e) {
+                  console.error(`Failed to create repository ${repoName}: ${e.message}`);
+                  continue;
+                }
+              }
+              
+              // Add collaborator
+              console.log(`Inviting ${githubHandle} to ${repoName}...`);
+              try {
+                await github.rest.repos.addCollaborator({
+                  owner,
+                  repo: repoName,
+                  username: githubHandle,
+                  permission: 'admin'
+                });
+              } catch (e) {
+                console.warn(`Failed to invite ${githubHandle}: ${e.message}`);
+              }
+              
+              // Codespaces Badge
+              if (addCodespaces) {
+                console.log(`Adding Codespaces badge to ${repoName}...`);
+                const badge = `[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/${owner}/${repoName}?quickstart=1)`;
+                try {
+                  const readmeObj = await github.rest.repos.getContent({ owner, repo: repoName, path: 'README.md' }).catch(() => null);
+                  if (readmeObj && readmeObj.data) {
+                    const currentContent = Buffer.from(readmeObj.data.content, 'base64').toString('utf8');
+                    if (!currentContent.includes('codespaces.new')) {
+                      const newContent = `${badge}\n\n${currentContent}`;
+                      await github.rest.repos.createOrUpdateFileContents({
+                        owner, repo: repoName, path: 'README.md',
+                        message: 'Add Codespaces badge',
+                        content: Buffer.from(newContent).toString('base64'),
+                        sha: readmeObj.data.sha
+                      });
+                    }
+                  } else {
+                    await github.rest.repos.createOrUpdateFileContents({
+                      owner, repo: repoName, path: 'README.md',
+                      message: 'Add Codespaces badge',
+                      content: Buffer.from(`${badge}\n`).toString('base64')
+                    });
+                  }
+                } catch (e) {
+                  console.warn(`Failed to update README with Codespaces badge: ${e.message}`);
+                }
+              }
+              
+              // Write Log File to disk for the Bash step
+              const logData = [
+                `github_handle: ${githubHandle}`,
+                `name: ${student.name || ''}`,
+                `email: ${student.email || 'no-email'}`,
+                `created_at: ${new Date().toISOString()}`,
+                `repo: ${owner}/${repoName}`
+              ].join('\n');
+              
+              fs.writeFileSync(path.join(logDir, `${githubHandle}.txt`), logData);
+              
+              // Notify Server
+              try {
+                const readyUrl = `${serverUrl}/api/ready/${shortcode}/${repoName}`;
+                await fetch(readyUrl, { method: 'POST' });
+              } catch (e) {
+                console.warn(`Failed to notify server: ${e.message}`);
+              }
+            }
             
-            # Check if remote branch exists to determine if we can pull/push normally or need to initialize
-            REMOTE_EXISTS=$(git ls-remote --heads origin main 2>/dev/null | wc -l)
-            
-            for i in {1..5}; do
-              if [ "$REMOTE_EXISTS" -eq 0 ]; then
-                git branch -M main
-                git push -u origin main && break
-              else
-                git pull --rebase origin main || true
-                git push origin main && break
-              fi
-              echo "Git push to tracking repo failed, retrying in a few seconds..."
-              sleep $((RANDOM % 5 + 1))
-            done
-            cd ..
-          fi
+            // Flag file for bash step
+            if (fs.readdirSync(logDir).length > 0) {
+              fs.writeFileSync(path.join(process.env.GITHUB_WORKSPACE, 'HAS_LOGS'), 'true');
+            }
 
-      - name: Run Diagnostics
-        if: ${{ github.event.inputs.dry_run == 'true' || inputs.dry_run == 'true' }}
+      - name: Push Tracking Logs & Dashboard (Bash)
+        if: ${{ steps.setup.outputs.mode == 'student_join' && github.event.inputs.dry_run != 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          OWNER: ${{ github.event.inputs.target_owner || github.repository_owner }}
+          OWNER: ${{ steps.setup.outputs.owner }}
           TRACKING_REPO: ${{ vars.CLASSREPO_TRACKER_NAME || 'class-repo-tracking' }}
+          ASSIGNMENT_NAME: ${{ steps.setup.outputs.assignment_name }}
         run: |
-          echo "Running Diagnostics..."
-          
-          # Get Executor App Details
-          EXECUTOR_NAME=$(gh api /app -q .name 2>/dev/null || echo "Unknown App")
-          EXECUTOR_PERMS=$(gh api /app -q '.permissions | to_entries | map("\(.key): \(.value)") | join(", ")' 2>/dev/null || echo "Unknown")
-          
-          # Get Installed Orgs
-          ORGS_JSON=$(gh api /app/installations -q '[.[] | .account.login]' 2>/dev/null || echo "[]")
-          
-          # Check Tracking Repo
-          TRACKING_EXISTS=$(gh api repos/$OWNER/$TRACKING_REPO -q .name 2>/dev/null || echo "")
-          TRACKING_STATUS="Not Found"
-          if [ "$TRACKING_EXISTS" == "$TRACKING_REPO" ]; then
-              TRACKING_STATUS="Created (${OWNER}/${TRACKING_REPO})"
+          if [ ! -f "HAS_LOGS" ]; then
+            echo "No logs generated, skipping push."
+            exit 0
           fi
           
-          PAYLOAD=$(jq -n \
-            --arg name "$EXECUTOR_NAME" \
-            --arg perms "$EXECUTOR_PERMS" \
-            --arg tracking "$TRACKING_STATUS" \
-            --argjson orgs "$ORGS_JSON" \
-            '{executor_name: $name, executor_perms: $perms, orgs: $orgs, tracking_repo: $tracking}')
-            
-          echo "Diagnostics Payload: $PAYLOAD"
-          curl -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "${{ github.event.inputs.server_url }}/api/ready/system/${{ github.repository_owner }}"
+          # Auto-provision tracking repository if it doesn't exist
+          TRACKING_EXISTS=$(gh api repos/$OWNER/$TRACKING_REPO -q .name 2>/dev/null || echo "")
+          TRACKING_IS_PRIVATE=$(gh api repos/$OWNER/$TRACKING_REPO -q .private 2>/dev/null || echo "false")
+          
+          if [ "$TRACKING_EXISTS" != "$TRACKING_REPO" ]; then
+              echo "Tracking repo '$TRACKING_REPO' not found. Attempting to create it..."
+              if gh repo create $OWNER/$TRACKING_REPO --private; then
+                  echo "Successfully created tracking repo."
+                  gh repo edit $OWNER/$TRACKING_REPO --add-topic "classrepo-tracking" || true
+                  TRACKING_EXISTS="$TRACKING_REPO"
+                  TRACKING_IS_PRIVATE="true"
+                  # Init Readme
+                  gh api -X PUT repos/$OWNER/$TRACKING_REPO/contents/README.md \
+                    -f message="Initial commit" -f content=$(echo -n "# ClassRepo Tracking Data" | base64) || true
+              else
+                  echo "::warning::Failed to create tracking repo '$TRACKING_REPO'."
+              fi
+          fi
+          
+          if [ "$TRACKING_EXISTS" == "$TRACKING_REPO" ] && [ "$TRACKING_IS_PRIVATE" == "true" ]; then
+              echo "Pushing logs to dedicated $TRACKING_REPO repository..."
+              git clone "https://x-access-token:$GH_TOKEN@github.com/$OWNER/$TRACKING_REPO.git" tracking_repo_clone
+              
+              mkdir -p "tracking_repo_clone/logs/$ASSIGNMENT_NAME"
+              cp logs_generated/*.txt "tracking_repo_clone/logs/$ASSIGNMENT_NAME/"
+              cd tracking_repo_clone
+              
+              # Generate Markdown Dashboard
+              echo "# Student Repository Dashboard" > logs/$ASSIGNMENT_NAME/README.md
+              echo "| GitHub Handle | Name | Email | Repository | Created At |" >> logs/$ASSIGNMENT_NAME/README.md
+              echo "|---------------|------|-------|------------|------------|" >> logs/$ASSIGNMENT_NAME/README.md
+              
+              for file in logs/$ASSIGNMENT_NAME/*.txt; do
+                if [ -f "$file" ]; then
+                  HANDLE=$(grep "github_handle:" "$file" | cut -d' ' -f2-)
+                  SNAME=$(grep "name:" "$file" | cut -d' ' -f2-)
+                  SEMAIL=$(grep "email:" "$file" | cut -d' ' -f2-)
+                  SREPO=$(grep "repo:" "$file" | cut -d' ' -f2-)
+                  SCREATED=$(grep "created_at:" "$file" | cut -d' ' -f2-)
+                  echo "| [@$HANDLE](https://github.com/$HANDLE) | $SNAME | $SEMAIL | [$SREPO](https://github.com/$SREPO) | $SCREATED |" >> logs/$ASSIGNMENT_NAME/README.md
+                fi
+              done
+              
+              git config user.name "ClassRepo Automator"
+              git config user.email "automator@classrepo.internal"
+              
+              git add logs/
+              git commit -m "Log repository creation and update dashboard for batch" || true
+              
+              for i in {1..5}; do
+                git pull --rebase origin main || true
+                git push origin main && break
+                echo "Git push to tracking repo failed, retrying in a few seconds..."
+                sleep $((RANDOM % 5 + 1))
+              done
+              cd ..
+          else
+              echo "::warning::Tracking repo is missing or public. Skipping log push for privacy."
+          fi
