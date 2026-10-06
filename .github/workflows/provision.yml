@@ -36,6 +36,9 @@ on:
         description: 'JSON payload for advanced routing and inputs'
         required: false
 
+permissions:
+  contents: write
+
 jobs:
   provision:
     uses: class-repo/class-repo-automator/.github/workflows/core.yml@main
