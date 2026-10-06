@@ -220,7 +220,8 @@ jobs:
               
               // Notify Server
               try {
-                const readyUrl = `${serverUrl}/api/ready/${shortcode}/${repoName}`;
+                const syncKey = student.sync_key || repoName;
+                const readyUrl = `${serverUrl}/api/ready/${shortcode}/${syncKey}`;
                 const readyRes = await fetch(readyUrl, { method: 'POST' });
                 if (readyRes.ok) {
                     const data = await readyRes.json();
