@@ -221,7 +221,11 @@ jobs:
               // Notify Server
               try {
                 const readyUrl = `${serverUrl}/api/ready/${shortcode}/${repoName}`;
-                await fetch(readyUrl, { method: 'POST' });
+                const readyRes = await fetch(readyUrl, { method: 'POST' });
+                if (readyRes.ok) {
+                    const data = await readyRes.json();
+                    console.log(`[Webhook Success] Hashed KV Sync Key: ${data.hash}`);
+                }
               } catch (e) {
                 console.warn(`Failed to notify server: ${e.message}`);
               }
