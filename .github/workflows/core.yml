@@ -171,14 +171,8 @@ jobs:
 
           mkdir -p "logs/$ASSIGNMENT_NAME"
           
-          # Extract students from either generic payload or legacy input
-          STUDENTS_ARRAY="$STUDENTS_JSON"
-          if [ -n "$PAYLOAD" ] && [ "$PAYLOAD" != "null" ]; then
-              PAYLOAD_STUDENTS=$(echo "$PAYLOAD" | jq -c '.students // empty')
-              if [ -n "$PAYLOAD_STUDENTS" ]; then
-                  STUDENTS_ARRAY="$PAYLOAD_STUDENTS"
-              fi
-          fi
+          # Extract students strictly from the payload object
+          STUDENTS_ARRAY=$(echo "$PAYLOAD" | jq -c '.students // []')
           
           # Iterate over the array elements, properly decoding base64 to handle spaces
           for row in $(echo "${STUDENTS_ARRAY}" | jq -r '.[] | @base64'); do
@@ -186,10 +180,10 @@ jobs:
              echo ${row} | base64 --decode | jq -r ${1}
             }
             
-            # Support both new payload keys and old CSV keys
-            STUDENT_HANDLE=$(_jq '.github // .student_handle')
-            STUDENT_NAME=$(_jq '.name // .student_name // empty')
-            STUDENT_EMAIL=$(_jq '.email // .student_email')
+            # Standardized schema: github, name, email, hashed_repo_name
+            STUDENT_HANDLE=$(_jq '.github')
+            STUDENT_NAME=$(_jq '.name')
+            STUDENT_EMAIL=$(_jq '.email')
             HASHED_REPO=$(_jq '.hashed_repo_name // empty')
             
             if [ -z "$HASHED_REPO" ] || [ "$HASHED_REPO" == "null" ]; then
