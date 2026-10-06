@@ -172,7 +172,7 @@ jobs:
                   owner,
                   repo: repoName,
                   username: githubHandle,
-                  permission: 'admin'
+                  permission: 'push'
                 });
               } catch (e) {
                 console.warn(`Failed to invite ${githubHandle}: ${e.message}`);
