@@ -172,12 +172,12 @@ jobs:
 
           for row in $(echo "${STUDENTS_ARRAY}" | jq -r '.[] | @base64'); do
             _jq() {
-             echo ${row} | base64 --decode | jq -r ${1}
+             echo ${row} | base64 --decode | jq -r "${1}"
             }
             
-            STUDENT_HANDLE=$(_jq '.github // .student_handle')
-            STUDENT_NAME=$(_jq '.name // .student_name // empty')
-            STUDENT_EMAIL=$(_jq '.email // .student_email')
+            STUDENT_HANDLE=$(_jq '.github')
+            STUDENT_NAME=$(_jq '.name')
+            STUDENT_EMAIL=$(_jq '.email')
             HASHED_REPO=$(_jq '.hashed_repo_name // empty')
 
             if [ -z "$HASHED_REPO" ] || [ "$HASHED_REPO" == "null" ]; then
