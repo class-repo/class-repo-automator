@@ -73,7 +73,7 @@ on:
     secrets:
       CLASSREPO_APP_ID:
         required: true
-      CLASSREPO_APP_PEM:
+      CLASSREPO_APP_PRIVATE_KEY:
         required: true
 
 permissions:
