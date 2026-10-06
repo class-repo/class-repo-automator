@@ -45,7 +45,7 @@ jobs:
         with:
           app-id: ${{ secrets.CLASSREPO_APP_ID }}
           private-key: ${{ secrets.CLASSREPO_APP_PRIVATE_KEY }}
-          owner: ${{ steps.setup.outputs.owner }}
+          owner: ${{ github.repository_owner }}
 
       - name: Checkout Automator Repository
         uses: actions/checkout@v4
