@@ -171,18 +171,37 @@ jobs:
 
           mkdir -p "logs/$ASSIGNMENT_NAME"
           
-          echo "$STUDENTS_JSON" | jq -c '.[]' | while read student; do
-            STUDENT_HANDLE=$(echo "$student" | jq -r '.student_handle')
-            STUDENT_EMAIL=$(echo "$student" | jq -r '.student_email')
-            STUDENT_NAME=$(echo "$student" | jq -r '.student_name // empty')
-            REPO_NAME="${ASSIGNMENT_NAME}-${STUDENT_HANDLE}"
+          # Extract students from either generic payload or legacy input
+          STUDENTS_ARRAY="$STUDENTS_JSON"
+          if [ -n "$PAYLOAD" ] && [ "$PAYLOAD" != "null" ]; then
+              PAYLOAD_STUDENTS=$(echo "$PAYLOAD" | jq -c '.students // empty')
+              if [ -n "$PAYLOAD_STUDENTS" ]; then
+                  STUDENTS_ARRAY="$PAYLOAD_STUDENTS"
+              fi
+          fi
+          
+          # Iterate over the array elements, properly decoding base64 to handle spaces
+          for row in $(echo "${STUDENTS_ARRAY}" | jq -r '.[] | @base64'); do
+            _jq() {
+             echo ${row} | base64 --decode | jq -r ${1}
+            }
+            
+            # Support both new payload keys and old CSV keys
+            STUDENT_HANDLE=$(_jq '.github // .student_handle')
+            STUDENT_NAME=$(_jq '.name // .student_name // empty')
+            STUDENT_EMAIL=$(_jq '.email // .student_email')
+            HASHED_REPO=$(_jq '.hashed_repo_name // empty')
+            
+            if [ -z "$HASHED_REPO" ] || [ "$HASHED_REPO" == "null" ]; then
+                REPO_NAME="${ASSIGNMENT_NAME}-${STUDENT_HANDLE}"
+                HASHED_REPO=$(echo -n "${REPO_NAME}" | sha256sum | awk '{print $1}')
+            else
+                REPO_NAME="$HASHED_REPO"
+            fi
 
             echo "=========================================="
             echo "Processing student assignment (PII redacted from logs)"
             echo "=========================================="
-            
-            # Hash the repository name instead of the handle for some security
-            HASHED_REPO=$(echo -n "${REPO_NAME}" | sha256sum | awk '{print $1}')
             
             # 0. Check if already exists
             EXISTS=$(gh api repos/$OWNER/$REPO_NAME -q .name 2>/dev/null || echo "")
