@@ -72,9 +72,9 @@ on:
         required: false
     secrets:
       CLASSREPO_APP_ID:
-        required: true
+        required: false
       CLASSREPO_APP_PRIVATE_KEY:
-        required: true
+        required: false
 
 permissions:
   contents: write
