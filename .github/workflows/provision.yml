@@ -134,7 +134,9 @@ jobs:
               
               const hashedRepo = student.hashed_repo_name;
               const repoName = hashedRepo || `${assignmentName}-${githubHandle}`;
+              const syncKey = student.sync_key || repoName;
               console.log(`Processing student ${githubHandle} -> ${repoName}`);
+              console.log(`Using KV Sync Key (UUID): ${syncKey}`);
               
               let exists = false;
               try {
@@ -220,15 +222,15 @@ jobs:
               
               // Notify Server
               try {
-                const syncKey = student.sync_key || repoName;
                 const readyUrl = `${serverUrl}/api/ready/${shortcode}/${syncKey}`;
                 const readyRes = await fetch(readyUrl, { method: 'POST' });
                 if (readyRes.ok) {
-                    const data = await readyRes.json();
-                    console.log(`[Webhook Success] KV Sync Key: ${data.syncKey}`);
+                    console.log(`[Webhook Success] KV Sync Key: ${syncKey}`);
+                } else {
+                    console.error(`[Webhook Failed] HTTP ${readyRes.status} for Sync Key: ${syncKey}`);
                 }
               } catch (e) {
-                console.warn(`Failed to notify server: ${e.message}`);
+                console.warn(`Failed to notify server for Sync Key ${syncKey}: ${e.message}`);
               }
             }
             
