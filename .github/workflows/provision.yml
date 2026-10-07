@@ -225,7 +225,7 @@ jobs:
                 const readyRes = await fetch(readyUrl, { method: 'POST' });
                 if (readyRes.ok) {
                     const data = await readyRes.json();
-                    console.log(`[Webhook Success] Hashed KV Sync Key: ${data.hash}`);
+                    console.log(`[Webhook Success] KV Sync Key: ${data.syncKey}`);
                 }
               } catch (e) {
                 console.warn(`Failed to notify server: ${e.message}`);
