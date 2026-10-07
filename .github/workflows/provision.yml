@@ -134,27 +134,17 @@ jobs:
             const logDir = path.join(process.env.GITHUB_WORKSPACE, 'logs_generated');
             fs.mkdirSync(logDir, { recursive: true });
             
-            for (const student of students) {
-              const githubHandle = student.github || student.student_handle;
-              if (!githubHandle) continue;
-              
-              const repoName = `${assignmentName}-${githubHandle}`;
-              const syncKey = student.sync_key;
-              console.log(`Processing student ${githubHandle} -> ${repoName}`);
-              // Bulk (CSV) rows have no sync_key: nobody is polling, so there is nothing to notify.
-              
+            // Provision one student. Throws an Error with a short, student-safe message on failure.
+            async function provisionStudent(student, githubHandle, repoName) {
               let exists = false;
               try {
                 await github.rest.repos.get({ owner, repo: repoName });
                 exists = true;
                 console.log(`Repository ${repoName} already exists! Skipping creation.`);
               } catch (e) {
-                if (e.status !== 404) {
-                  console.error(`Error checking repo: ${e.message}`);
-                  continue;
-                }
+                if (e.status !== 404) throw new Error(`Could not check for an existing repository (HTTP ${e.status || 'error'}).`);
               }
-              
+
               if (!exists) {
                 console.log(`Creating repository ${owner}/${repoName} from template ${template}`);
                 try {
@@ -167,24 +157,17 @@ jobs:
                     include_all_branches: false
                   });
                 } catch (e) {
-                  console.error(`Failed to create repository ${repoName}: ${e.message}`);
-                  continue;
+                  throw new Error(`Could not create the repository from the template (HTTP ${e.status || 'error'}).`);
                 }
               }
-              
-              // Add collaborator
+
               console.log(`Inviting ${githubHandle} to ${repoName}...`);
               try {
-                await github.rest.repos.addCollaborator({
-                  owner,
-                  repo: repoName,
-                  username: githubHandle,
-                  permission: 'push'
-                });
+                await github.rest.repos.addCollaborator({ owner, repo: repoName, username: githubHandle, permission: 'push' });
               } catch (e) {
-                console.warn(`Failed to invite ${githubHandle}: ${e.message}`);
+                throw new Error(`The repository exists, but inviting @${githubHandle} failed (HTTP ${e.status || 'error'}).`);
               }
-              
+
               // Codespaces Badge
               if (addCodespaces) {
                 console.log(`Adding Codespaces badge to ${repoName}...`);
@@ -222,30 +205,52 @@ jobs:
                 `created_at: ${new Date().toISOString()}`,
                 `repo: ${owner}/${repoName}`
               ].join('\n');
-              
               fs.writeFileSync(path.join(logDir, `${githubHandle}.txt`), logData);
-              
-              // Notify Server
-              if (syncKey) try {
-                const readyUrl = `${serverUrl}/api/ready/${shortcode}/${syncKey}`;
-                const readyRes = await fetch(readyUrl, { method: 'POST', headers: { 'X-Ready-Token': student.ready_token || '' } });
-                if (readyRes.ok) {
-                    console.log(`[Webhook Success] KV Sync Key: ${syncKey}`);
-                } else {
-                    console.error(`[Webhook Failed] HTTP ${readyRes.status} for Sync Key: ${syncKey}`);
-                }
+            }
+
+            // Tell the server how this student's run ended so the Status page can show it.
+            async function report(student, status, error) {
+              // Bulk (CSV) rows have no sync_key: nobody is polling, so there is nothing to notify.
+              if (!student.sync_key) return;
+              try {
+                const res = await fetch(`${serverUrl}/api/ready/${shortcode}/${student.sync_key}`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', 'X-Ready-Token': student.ready_token || '' },
+                  body: JSON.stringify({ status, error })
+                });
+                if (!res.ok) core.warning(`Server rejected '${status}' report for ${student.github} (HTTP ${res.status}).`);
               } catch (e) {
-                console.warn(`Failed to notify server for Sync Key ${syncKey}: ${e.message}`);
+                core.warning(`Failed to notify server for ${student.github}: ${e.message}`);
               }
             }
-            
+
+            const failures = [];
+            for (const student of students) {
+              const githubHandle = student.github;
+              if (!githubHandle) continue;
+              const repoName = `${assignmentName}-${githubHandle}`;
+              console.log(`Processing student ${githubHandle} -> ${repoName}`);
+              try {
+                await provisionStudent(student, githubHandle, repoName);
+                await report(student, 'ready');
+              } catch (e) {
+                core.error(`${githubHandle}: ${e.message}`);
+                failures.push(githubHandle);
+                await report(student, 'failed', e.message);
+              }
+            }
+
             // Flag file for bash step
             if (fs.readdirSync(logDir).length > 0) {
               fs.writeFileSync(path.join(process.env.GITHUB_WORKSPACE, 'HAS_LOGS'), 'true');
             }
 
+            if (failures.length > 0) {
+              core.setFailed(`Provisioning failed for ${failures.length} student(s): ${failures.join(', ')}`);
+            }
+
       - name: Push Tracking Logs & Dashboard (Bash)
-        if: ${{ steps.setup.outputs.mode == 'student_join' && github.event.inputs.dry_run != 'true' }}
+        if: ${{ !cancelled() && steps.setup.outputs.mode == 'student_join' && github.event.inputs.dry_run != 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           OWNER: ${{ steps.setup.outputs.owner }}
