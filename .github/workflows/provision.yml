@@ -136,6 +136,9 @@ jobs:
               const repoName = hashedRepo || `${assignmentName}-${githubHandle}`;
               const syncKey = student.sync_key || repoName;
               console.log(`Processing student ${githubHandle} -> ${repoName}`);
+              if (!student.sync_key) {
+                core.warning(`No sync_key in payload for ${githubHandle}; falling back to repo name '${repoName}'. The Status page will NOT detect completion.`);
+              }
               console.log(`Using KV Sync Key (UUID): ${syncKey}`);
               
               let exists = false;
