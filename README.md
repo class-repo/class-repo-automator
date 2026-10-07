@@ -1,6 +1,6 @@
 # ClassRepo Automator
 
-This repository serves strictly as a **GitHub Actions Runner** for ClassRepo. It contains no application logic or web server, only a `.github/workflows/provision.yml` file.
+This repository serves strictly as a **GitHub Actions Runner** for ClassRepo. It contains no application logic or web server, only a `.github/workflows/provision.yml` workflow and an optional local script (`scripts/provision.sh`).
 
 ## Why this exists
 
@@ -17,7 +17,7 @@ By offloading the heavy lifting to GitHub Actions, we get:
 2.  The workflow reads the `inputs` payload (which contains the student's GitHub handle, the template repository, etc).
 3.  The workflow uses the `CLASSREPO_APP_ID` and `CLASSREPO_APP_PRIVATE_KEY` secrets to generate a short-lived token for the **Executor App** (which the educator installed during onboarding).
 4.  Using this token, the workflow clones the template, pushes it to a new repository (`{assignment-name}-{student-handle}`), and sends the student an invitation.
-5.  Finally, the workflow fires a webhook (`POST /api/ready/:shortcode/:hashed_repo`) back to the `class-repo-server` to signal completion.
+5.  Finally, for each student the workflow reports `ready` or `failed` (with a reason) to `POST /api/ready/:shortcode/:sync_key` on the `class-repo-server`, sending the signed `X-Ready-Token` it was given. The job is marked failed if any student failed. Students added in bulk (CSV) have no sync key, so nothing is reported for them.
 
 ## Required Secrets & Variables
 
@@ -25,4 +25,8 @@ By offloading the heavy lifting to GitHub Actions, we get:
     *   `CLASSREPO_APP_ID`: The App ID of the Executor App.
     *   `CLASSREPO_APP_PRIVATE_KEY`: The PEM private key of the Executor App.
 *   **Variables**:
-    *   `CLASSREPO_TRACKER_NAME`: The name of the repository used to store the CSV tracking spreadsheet (defaults to `class-repo-tracking`).
+    *   `CLASSREPO_TRACKER_NAME`: The name of the repository used to store the CSV tracking spreadsheet (defaults to `class-repo-tracking`). The workflow creates this private repository on first use if it does not exist.
+
+## Updating
+
+Your copy of `provision.yml` is self-contained, so nothing changes in it unless you update it. To pick up a new version, copy `.github/workflows/provision.yml` from the template repository (`class-repo/class-repo-automator`) into your repository. Workflow changes that rely on newer server behaviour (for example the signed ready token) are noted in the template's commit history.
