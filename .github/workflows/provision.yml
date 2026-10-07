@@ -107,6 +107,11 @@ jobs:
       - name: Provision Student Repositories (JavaScript API)
         if: ${{ steps.setup.outputs.mode == 'student_join' && github.event.inputs.dry_run != 'true' }}
         uses: actions/github-script@v7
+        env:
+          OWNER: ${{ steps.setup.outputs.owner }}
+          TEMPLATE: ${{ steps.setup.outputs.template }}
+          ASSIGNMENT_NAME: ${{ steps.setup.outputs.assignment_name }}
+          ADD_CODESPACES: ${{ steps.setup.outputs.add_codespaces }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -114,11 +119,12 @@ jobs:
             const path = require('path');
             const payload = JSON.parse(context.payload.inputs.payload);
             const students = payload.students || [];
-            
-            const owner = '${{ steps.setup.outputs.owner }}';
-            const template = '${{ steps.setup.outputs.template }}';
-            const assignmentName = '${{ steps.setup.outputs.assignment_name }}';
-            const addCodespaces = '${{ steps.setup.outputs.add_codespaces }}' === 'true';
+
+            // Values arrive through env vars (not ${{ }} inside the script) so they cannot inject code.
+            const owner = process.env.OWNER;
+            const template = process.env.TEMPLATE;
+            const assignmentName = process.env.ASSIGNMENT_NAME;
+            const addCodespaces = process.env.ADD_CODESPACES === 'true';
             const serverUrl = context.payload.inputs.server_url;
             const shortcode = context.payload.inputs.shortcode;
             
@@ -132,14 +138,10 @@ jobs:
               const githubHandle = student.github || student.student_handle;
               if (!githubHandle) continue;
               
-              const hashedRepo = student.hashed_repo_name;
-              const repoName = hashedRepo || `${assignmentName}-${githubHandle}`;
-              const syncKey = student.sync_key || repoName;
+              const repoName = `${assignmentName}-${githubHandle}`;
+              const syncKey = student.sync_key;
               console.log(`Processing student ${githubHandle} -> ${repoName}`);
-              if (!student.sync_key) {
-                core.warning(`No sync_key in payload for ${githubHandle}; falling back to repo name '${repoName}'. The Status page will NOT detect completion.`);
-              }
-              console.log(`Using KV Sync Key (UUID): ${syncKey}`);
+              // Bulk (CSV) rows have no sync_key: nobody is polling, so there is nothing to notify.
               
               let exists = false;
               try {
@@ -224,9 +226,9 @@ jobs:
               fs.writeFileSync(path.join(logDir, `${githubHandle}.txt`), logData);
               
               // Notify Server
-              try {
+              if (syncKey) try {
                 const readyUrl = `${serverUrl}/api/ready/${shortcode}/${syncKey}`;
-                const readyRes = await fetch(readyUrl, { method: 'POST' });
+                const readyRes = await fetch(readyUrl, { method: 'POST', headers: { 'X-Ready-Token': student.ready_token || '' } });
                 if (readyRes.ok) {
                     console.log(`[Webhook Success] KV Sync Key: ${syncKey}`);
                 } else {
