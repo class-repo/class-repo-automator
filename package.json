@@ -1,0 +1,8 @@
+{
+  "name": "class-repo-automator",
+  "private": true,
+  "description": "Scripts and tests for the ClassRepo provisioning workflow",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

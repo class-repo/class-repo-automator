@@ -1,51 +1,28 @@
 # Provision Student Repositories
 #
-# Started by the ClassRepo server (workflow_dispatch). For each student in `payload.students` it
-# creates a private repo from the template, invites the student, and reports `ready` or `failed`
-# back to POST {server_url}/api/ready/{shortcode}/{sync_key} (authenticated with `ready_token`).
-# Students without a sync_key (bulk CSV rows) are provisioned but not reported.
-# Everything runs in this repo with the educator's own secrets; no code is fetched from elsewhere.
+# Started by the ClassRepo server (workflow_dispatch). This repository may be public, so the dispatch
+# carries only a random batch id. The job (template, assignment, and student records sealed to this
+# repo's roster key) is fetched from the server using this run's GitHub OIDC token, and the logic in
+# scripts/provision.js never logs anything identifying. See README.md.
 name: Provision Student Repositories
 
 on:
   workflow_dispatch:
     inputs:
-      payload:
-        description: 'JSON payload containing template, assignment_name, students array, etc.'
+      batch_id:
+        description: 'Random id of the job to run (set by the ClassRepo server)'
         required: true
       server_url:
-        description: 'URL of the ClassRepo Server'
+        description: 'URL of the ClassRepo server'
         required: true
-      shortcode:
-        description: 'Assignment shortcode for KV API updates'
-        required: true
-      dry_run:
-        description: 'Run diagnostics instead of provisioning'
-        required: false
-        default: 'false'
-
-# The default token is only used to check out this repo. All writes use the Executor App token.
-permissions:
-  contents: read
 
 jobs:
   provision:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read    # check out this repository
+      id-token: write   # lets the run prove its identity to the ClassRepo server (OIDC)
     steps:
-      - name: Parse Payload & Setup Env
-        id: setup
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const payload = JSON.parse(context.payload.inputs.payload);
-            const mode = payload.mode || "student_join";
-            core.setOutput('mode', mode);
-            core.setOutput('template', payload.template || "");
-            core.setOutput('assignment_name', payload.assignment_name || "");
-            core.setOutput('owner', payload.target_owner || context.repo.owner);
-            core.setOutput('add_codespaces', payload.add_codespaces || "false");
-            core.setOutput('shortcode', payload.shortcode || context.payload.inputs.shortcode);
-
       - name: Generate Executor App Token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -56,223 +33,19 @@ jobs:
 
       - name: Checkout Automator Repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Provision Student Repositories (JavaScript API)
-        if: ${{ steps.setup.outputs.mode == 'student_join' && github.event.inputs.dry_run != 'true' }}
+      - name: Run job
         uses: actions/github-script@v7
         env:
-          OWNER: ${{ steps.setup.outputs.owner }}
-          TEMPLATE: ${{ steps.setup.outputs.template }}
-          ASSIGNMENT_NAME: ${{ steps.setup.outputs.assignment_name }}
-          ADD_CODESPACES: ${{ steps.setup.outputs.add_codespaces }}
+          BATCH_ID: ${{ inputs.batch_id }}
+          SERVER_URL: ${{ inputs.server_url }}
+          EXECUTOR_TOKEN: ${{ steps.app-token.outputs.token }}
+          ROSTER_PRIVATE_KEY: ${{ secrets.CLASSREPO_ROSTER_PRIVATE_KEY }}
+          TRACKING_REPO: ${{ vars.CLASSREPO_TRACKER_NAME || 'class-repo-tracking' }}
+          # Optional: comma-separated owners whose repositories may be used as templates.
+          ALLOWED_TEMPLATE_OWNERS: ${{ vars.CLASSREPO_ALLOWED_TEMPLATE_OWNERS }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
-            const fs = require('fs');
-            const path = require('path');
-            const payload = JSON.parse(context.payload.inputs.payload);
-            const students = payload.students || [];
-
-            // Values arrive through env vars (not ${{ }} inside the script) so they cannot inject code.
-            const owner = process.env.OWNER;
-            const template = process.env.TEMPLATE;
-            const assignmentName = process.env.ASSIGNMENT_NAME;
-            const addCodespaces = process.env.ADD_CODESPACES === 'true';
-            const serverUrl = context.payload.inputs.server_url;
-            const shortcode = context.payload.inputs.shortcode;
-            
-            const [templateOwner, templateRepo] = template.split('/');
-            
-            // Prepare logs directory
-            const logDir = path.join(process.env.GITHUB_WORKSPACE, 'logs_generated');
-            fs.mkdirSync(logDir, { recursive: true });
-            
-            // Provision one student. Throws an Error with a short, student-safe message on failure.
-            async function provisionStudent(student, githubHandle, repoName) {
-              let exists = false;
-              try {
-                await github.rest.repos.get({ owner, repo: repoName });
-                exists = true;
-                console.log(`Repository ${repoName} already exists! Skipping creation.`);
-              } catch (e) {
-                if (e.status !== 404) throw new Error(`Could not check for an existing repository (HTTP ${e.status || 'error'}).`);
-              }
-
-              if (!exists) {
-                console.log(`Creating repository ${owner}/${repoName} from template ${template}`);
-                try {
-                  await github.rest.repos.createUsingTemplate({
-                    template_owner: templateOwner,
-                    template_repo: templateRepo,
-                    owner: owner,
-                    name: repoName,
-                    private: true,
-                    include_all_branches: false
-                  });
-                } catch (e) {
-                  throw new Error(`Could not create the repository from the template (HTTP ${e.status || 'error'}).`);
-                }
-              }
-
-              console.log(`Inviting ${githubHandle} to ${repoName}...`);
-              try {
-                await github.rest.repos.addCollaborator({ owner, repo: repoName, username: githubHandle, permission: 'push' });
-              } catch (e) {
-                throw new Error(`The repository exists, but inviting @${githubHandle} failed (HTTP ${e.status || 'error'}).`);
-              }
-
-              // Codespaces Badge
-              if (addCodespaces) {
-                console.log(`Adding Codespaces badge to ${repoName}...`);
-                const badge = `[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/${owner}/${repoName}?quickstart=1)`;
-                try {
-                  const readmeObj = await github.rest.repos.getContent({ owner, repo: repoName, path: 'README.md' }).catch(() => null);
-                  if (readmeObj && readmeObj.data) {
-                    const currentContent = Buffer.from(readmeObj.data.content, 'base64').toString('utf8');
-                    if (!currentContent.includes('codespaces.new')) {
-                      const newContent = `${badge}\n\n${currentContent}`;
-                      await github.rest.repos.createOrUpdateFileContents({
-                        owner, repo: repoName, path: 'README.md',
-                        message: 'Add Codespaces badge',
-                        content: Buffer.from(newContent).toString('base64'),
-                        sha: readmeObj.data.sha
-                      });
-                    }
-                  } else {
-                    await github.rest.repos.createOrUpdateFileContents({
-                      owner, repo: repoName, path: 'README.md',
-                      message: 'Add Codespaces badge',
-                      content: Buffer.from(`${badge}\n`).toString('base64')
-                    });
-                  }
-                } catch (e) {
-                  console.warn(`Failed to update README with Codespaces badge: ${e.message}`);
-                }
-              }
-              
-              // Write Log File to disk for the Bash step
-              const logData = [
-                `github_handle: ${githubHandle}`,
-                `name: ${student.name || ''}`,
-                `email: ${student.email || 'no-email'}`,
-                `created_at: ${new Date().toISOString()}`,
-                `repo: ${owner}/${repoName}`
-              ].join('\n');
-              fs.writeFileSync(path.join(logDir, `${githubHandle}.txt`), logData);
-            }
-
-            // Tell the server how this student's run ended so the Status page can show it.
-            async function report(student, status, error) {
-              // Bulk (CSV) rows have no sync_key: nobody is polling, so there is nothing to notify.
-              if (!student.sync_key) return;
-              try {
-                const res = await fetch(`${serverUrl}/api/ready/${shortcode}/${student.sync_key}`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', 'X-Ready-Token': student.ready_token || '' },
-                  body: JSON.stringify({ status, error })
-                });
-                if (!res.ok) core.warning(`Server rejected '${status}' report for ${student.github} (HTTP ${res.status}).`);
-              } catch (e) {
-                core.warning(`Failed to notify server for ${student.github}: ${e.message}`);
-              }
-            }
-
-            const failures = [];
-            for (const student of students) {
-              const githubHandle = student.github;
-              if (!githubHandle) continue;
-              const repoName = `${assignmentName}-${githubHandle}`;
-              console.log(`Processing student ${githubHandle} -> ${repoName}`);
-              try {
-                await provisionStudent(student, githubHandle, repoName);
-                await report(student, 'ready');
-              } catch (e) {
-                core.error(`${githubHandle}: ${e.message}`);
-                failures.push(githubHandle);
-                await report(student, 'failed', e.message);
-              }
-            }
-
-            // Flag file for bash step
-            if (fs.readdirSync(logDir).length > 0) {
-              fs.writeFileSync(path.join(process.env.GITHUB_WORKSPACE, 'HAS_LOGS'), 'true');
-            }
-
-            if (failures.length > 0) {
-              core.setFailed(`Provisioning failed for ${failures.length} student(s): ${failures.join(', ')}`);
-            }
-
-      - name: Push Tracking Logs & Dashboard (Bash)
-        if: ${{ !cancelled() && steps.setup.outputs.mode == 'student_join' && github.event.inputs.dry_run != 'true' }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          OWNER: ${{ steps.setup.outputs.owner }}
-          TRACKING_REPO: ${{ vars.CLASSREPO_TRACKER_NAME || 'class-repo-tracking' }}
-          ASSIGNMENT_NAME: ${{ steps.setup.outputs.assignment_name }}
-        run: |
-          if [ ! -f "HAS_LOGS" ]; then
-            echo "No logs generated, skipping push."
-            exit 0
-          fi
-          
-          # Auto-provision tracking repository if it doesn't exist
-          TRACKING_EXISTS=$(gh api repos/$OWNER/$TRACKING_REPO -q .name 2>/dev/null || echo "")
-          TRACKING_IS_PRIVATE=$(gh api repos/$OWNER/$TRACKING_REPO -q .private 2>/dev/null || echo "false")
-          
-          if [ "$TRACKING_EXISTS" != "$TRACKING_REPO" ]; then
-              echo "Tracking repo '$TRACKING_REPO' not found. Attempting to create it..."
-              if gh repo create $OWNER/$TRACKING_REPO --private; then
-                  echo "Successfully created tracking repo."
-                  gh repo edit $OWNER/$TRACKING_REPO --add-topic "classrepo-tracking" || true
-                  TRACKING_EXISTS="$TRACKING_REPO"
-                  TRACKING_IS_PRIVATE="true"
-                  # Init Readme
-                  gh api -X PUT repos/$OWNER/$TRACKING_REPO/contents/README.md \
-                    -f message="Initial commit" -f content=$(echo -n "# ClassRepo Tracking Data" | base64) || true
-              else
-                  echo "::warning::Failed to create tracking repo '$TRACKING_REPO'."
-              fi
-          fi
-          
-          if [ "$TRACKING_EXISTS" == "$TRACKING_REPO" ] && [ "$TRACKING_IS_PRIVATE" == "true" ]; then
-              echo "Pushing logs to dedicated $TRACKING_REPO repository..."
-              git clone "https://x-access-token:$GH_TOKEN@github.com/$OWNER/$TRACKING_REPO.git" tracking_repo_clone
-              
-              mkdir -p "tracking_repo_clone/logs/$ASSIGNMENT_NAME"
-              cp logs_generated/*.txt "tracking_repo_clone/logs/$ASSIGNMENT_NAME/"
-              cd tracking_repo_clone
-              
-              # Generate Markdown Dashboard
-              echo "# Student Repository Dashboard" > logs/$ASSIGNMENT_NAME/README.md
-              echo "| GitHub Handle | Name | Email | Repository | Created At |" >> logs/$ASSIGNMENT_NAME/README.md
-              echo "|---------------|------|-------|------------|------------|" >> logs/$ASSIGNMENT_NAME/README.md
-              
-              for file in logs/$ASSIGNMENT_NAME/*.txt; do
-                if [ -f "$file" ]; then
-                  HANDLE=$(grep "github_handle:" "$file" | cut -d' ' -f2-)
-                  SNAME=$(grep "name:" "$file" | cut -d' ' -f2-)
-                  SEMAIL=$(grep "email:" "$file" | cut -d' ' -f2-)
-                  SREPO=$(grep "repo:" "$file" | cut -d' ' -f2-)
-                  SCREATED=$(grep "created_at:" "$file" | cut -d' ' -f2-)
-                  echo "| [@$HANDLE](https://github.com/$HANDLE) | $SNAME | $SEMAIL | [$SREPO](https://github.com/$SREPO) | $SCREATED |" >> logs/$ASSIGNMENT_NAME/README.md
-                fi
-              done
-              
-              git config user.name "ClassRepo Automator"
-              git config user.email "automator@classrepo.internal"
-              
-              git add logs/
-              git commit -m "Log repository creation and update dashboard for batch" || true
-              
-              for i in {1..5}; do
-                git pull --rebase origin main || true
-                git push origin main && break
-                echo "Git push to tracking repo failed, retrying in a few seconds..."
-                sleep $((RANDOM % 5 + 1))
-              done
-              cd ..
-          else
-              echo "::warning::Tracking repo is missing or public. Skipping log push for privacy."
-          fi
+            const run = require(`${process.env.GITHUB_WORKSPACE}/scripts/provision.js`);
+            await run({ github, context, core });
