@@ -26,7 +26,7 @@ jobs:
     steps:
       - name: Run the ClassRepo bot
         # Pinned to an exact commit. Dependabot proposes updates when a new version is released; read the changes before you merge them.
-        uses: class-repo/class-repo-bot-action@912fa58e3d0de6d408c446a2752487ca706590be # v4.2.0
+        uses: class-repo/class-repo-bot-action@58069a41d625b1d071b3bdc66fd5cfb45a43918b # v4.3.0
         with:
           batch-id: ${{ inputs.batch_id }}
           server-url: ${{ inputs.server_url }}
