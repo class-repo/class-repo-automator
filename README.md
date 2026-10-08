@@ -27,6 +27,8 @@ Running Actions in a public repository does not use up your minutes, but its run
 *   Student records are encrypted; only the roster private key (an Actions secret) can open them.
 *   The script never logs handles, names, emails or repository names. It reports "student 3 of 40", and registers every sensitive value as a masked secret. `test/provision.test.js` fails if anything identifying is logged.
 
+The workflow can also turn off GitHub Actions in each student repository (an option on each assignment, on by default for new ones). Students have write access, so without this they could run workflows that spend your organization's Actions minutes or read organization-wide secrets. Leave it off only if your template uses Actions for autograding.
+
 Keep write access to this repository small: anyone who can edit the workflow can read your Actions secrets, including the roster key.
 
 ## Required Secrets & Variables
@@ -39,6 +41,8 @@ Keep write access to this repository small: anyone who can edit the workflow can
     *   `CLASSREPO_ALLOWED_TEMPLATE_OWNERS` (optional): comma-separated owners whose repositories may be used as templates. If set, any job using another owner's template is refused.
 
 ## Updating
+
+`.github/dependabot.yml` proposes pull requests when the actions used by `provision.yml` have new versions. Review and merge them; do not delete the file unless you replace it with your own update process.
 
 `provision.yml` calls `scripts/provision.js` and `scripts/roster-crypto.js` from this repository, so an update means copying **`.github/workflows/provision.yml` and the `scripts/` folder** from the template repository (`class-repo/class-repo-automator`). Nothing changes until you do.
 
