@@ -43,7 +43,10 @@ function setup({ job, privateKeyPem, githubOverrides = {}, serverStatus = 200, e
         getContent: async () => { const e = new Error('nf'); e.status = 404; throw e; },
         createOrUpdateFileContents: async a => { calls.push(['badge', a.repo]); },
       },
-      users: { getByUsername: async () => ({ data: { type: 'Organization' } }) },
+      users: {
+        getByUsername: async () => ({ data: { type: 'Organization' } }),
+        getById: async ({ account_id }) => { calls.push(['lookup', account_id]); if (githubOverrides.lookup) return githubOverrides.lookup(account_id); return { data: { login: (githubOverrides.logins || {})[account_id] || `user${account_id}` } }; },
+      },
       actions: { setGithubActionsPermissionsRepository: async a => { calls.push(['actions', a.repo, a.enabled]); if (githubOverrides.actions) await githubOverrides.actions(a); } },
     },
   };
@@ -273,4 +276,52 @@ test('a failure to turn off Actions is a generic warning, not a failed student, 
   assert.ok(t.logs.some(l => l.startsWith('warning: Could not turn off GitHub Actions')));
   assert.ok(!t.logs.join('\n').includes('alice-gh'));
   assert.ok(!t.logs.some(l => l.startsWith('FAILED')));
+});
+
+const idJob = (pair, records) => ({
+  mode: 'student_join', template: 'cs101/starter', assignment_name: 'lab1', target_owner: 'cs101-org', add_codespaces: false, shortcode: 'abc123xyz',
+  students: records.map((r, i) => ({ sealed: seal(pair.publicKeyB64, r), sync_key: `k${i}` })),
+});
+
+test('uses the handle the account has now, so a renamed student is still invited', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: idJob(pair, [{ github_id: 77, github: 'old-name', name: 'Rena Med', email: 'rena@univ.edu' }]),
+    privateKeyPem: pair.privateKeyPem, githubOverrides: { logins: { 77: 'new-name' } } });
+  await exercise(t);
+  assert.deepEqual(t.calls, [['lookup', 77], ['create', 'lab1-new-name'], ['invite', 'new-name']]);
+  assert.deepEqual(results(t), [{ index: 0, status: 'ready' }]);
+  const roster = fs.readFileSync(path.join(t.tmpDir, 'logs_generated', 'new-name.txt'), 'utf8');
+  assert.match(roster, /github_id: 77/);
+  assert.match(roster, /github_handle: new-name/);
+  const everything = t.logs.join('\n');
+  for (const s of ['old-name', 'new-name', 'Rena Med', 'rena@univ.edu']) assert.ok(!everything.includes(s), `leaked ${s}`);
+});
+
+test('a recycled handle never reaches the wrong person: the account id decides', async () => {
+  const pair = generateRosterKeyPair();
+  // The sealed handle now belongs to a different account (id 999), but the student's own account (77) is "alice-new".
+  const t = setup({ job: idJob(pair, [{ github_id: 77, github: 'taken-handle', name: 'A', email: 'a@x' }]),
+    privateKeyPem: pair.privateKeyPem, githubOverrides: { logins: { 77: 'alice-new' } } });
+  await exercise(t);
+  assert.ok(t.calls.some(c => c[0] === 'invite' && c[1] === 'alice-new'));
+  assert.ok(!t.calls.some(c => JSON.stringify(c).includes('taken-handle')));
+});
+
+test('an account that no longer exists is reported generically and creates nothing', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: idJob(pair, [{ github_id: 5, github: 'gone', name: 'G', email: 'g@x' }]), privateKeyPem: pair.privateKeyPem,
+    githubOverrides: { lookup: async () => { const e = new Error('nf'); e.status = 404; throw e; } } });
+  await exercise(t);
+  assert.deepEqual(t.calls, [['lookup', 5]]);
+  assert.deepEqual(results(t), [{ index: 0, status: 'failed', error: 'That GitHub account no longer exists.' }]);
+  assert.ok(!t.logs.join('\n').includes('gone'));
+});
+
+test('a lookup that returns something that is not a handle is refused', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: idJob(pair, [{ github_id: 5, github: 'x', name: 'G', email: 'g@x' }]), privateKeyPem: pair.privateKeyPem,
+    githubOverrides: { lookup: async () => ({ data: { login: '../../etc' } }) } });
+  await exercise(t);
+  assert.deepEqual(t.calls, [['lookup', 5]]);
+  assert.equal(results(t)[0].status, 'failed');
 });

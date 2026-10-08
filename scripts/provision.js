@@ -98,6 +98,18 @@ async function run({ github, context, core, env = process.env, deps = {} }) {
     const logDir = path.join(tmp, 'logs_generated');
     fs.mkdirSync(logDir, { recursive: true });
 
+    async function currentHandle(record) {
+      if (record.github_id == null) return record.github; // records sealed before ids were added
+      let login;
+      try {
+        login = (await github.rest.users.getById({ account_id: Number(record.github_id) })).data.login;
+      } catch (e) {
+        throw new Error(e.status === 404 ? 'That GitHub account no longer exists.' : `Could not look up the GitHub account (HTTP ${e.status || 'error'}).`);
+      }
+      if (!HANDLE_RE.test(String(login))) throw new Error('Could not look up the GitHub account.');
+      return login;
+    }
+
     // Throws an Error with a short message that is safe to show to the student and to log.
     async function provisionStudent(record) {
       const repoName = `${assignment}-${record.github}`;
@@ -123,7 +135,7 @@ async function run({ github, context, core, env = process.env, deps = {} }) {
       if (job.add_codespaces) await addCodespacesBadge(repoName); // best effort
       if (job.disable_actions) await disableActions(repoName); // best effort
 
-      const lines = [`github_handle: ${record.github}`, `name: ${oneLine(record.name)}`, `email: ${oneLine(record.email) || 'no-email'}`,
+      const lines = [`github_id: ${record.github_id == null ? '' : record.github_id}`, `github_handle: ${record.github}`, `name: ${oneLine(record.name)}`, `email: ${oneLine(record.email) || 'no-email'}`,
         `created_at: ${new Date().toISOString()}`, `repo: ${owner}/${repoName}`];
       fs.writeFileSync(path.join(logDir, `${record.github}.txt`), lines.join('\n'));
     }
@@ -180,6 +192,10 @@ async function run({ github, context, core, env = process.env, deps = {} }) {
       [record.github, record.name, record.email].forEach(mask);
 
       try {
+        // The account id never changes but the handle can. Use the handle the account has NOW, so a student who renamed
+        // between joining and provisioning is still invited (and a recycled handle never reaches the wrong person).
+        record.github = await currentHandle(record);
+        mask(record.github);
         await provisionStudent(record);
         core.info(`${label}: done`);
         await report(index, 'ready');
