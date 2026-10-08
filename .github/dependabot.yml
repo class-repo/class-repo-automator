@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Proposes a pull request when a new version of the ClassRepo bot action is released.
+  # Read the changes before you merge: the action runs with your GitHub App's permissions.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
