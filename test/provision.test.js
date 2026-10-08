@@ -64,7 +64,7 @@ function setup({ job, privateKeyPem, githubOverrides = {}, serverStatus = 200, e
     BATCH_ID: BATCH, SERVER_URL: 'https://api.classrepo.org/', EXECUTOR_TOKEN: 'ghs_executor', ROSTER_PRIVATE_KEY: privateKeyPem,
     TRACKING_REPO: 'class-repo-tracking', RUNNER_TEMP: tmpDir,
   };
-  const context = { repo: { owner: 'cs101-org', repo: 'class-repo-automator' } };
+  const context = { repo: { owner: 'cs101-org', repo: 'class-repo-bot' } };
   return { logs, secrets, core, github, deps, env, context, calls, requests, exec, tmpDir };
 }
 
@@ -227,7 +227,7 @@ test('setup_keys stores the private key as a secret and sends only the public ke
   const t = setup({ job: { mode: 'setup_keys' }, privateKeyPem: '' });
   await exercise(t);
   const gh = t.exec.find(e => e.cmd === 'gh');
-  assert.deepEqual(gh.args, ['secret', 'set', 'CLASSREPO_ROSTER_PRIVATE_KEY', '--repo', 'cs101-org/class-repo-automator']);
+  assert.deepEqual(gh.args, ['secret', 'set', 'CLASSREPO_ROSTER_PRIVATE_KEY', '--repo', 'cs101-org/class-repo-bot']);
   assert.match(gh.opts.input, /BEGIN PRIVATE KEY/);
   assert.equal(gh.opts.env.GH_TOKEN, 'ghs_executor');
   const reg = t.requests.find(r => r.url.endsWith('/roster-key'));

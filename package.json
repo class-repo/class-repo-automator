@@ -1,5 +1,5 @@
 {
-  "name": "class-repo-automator",
+  "name": "class-repo-bot",
   "private": true,
   "description": "Scripts and tests for the ClassRepo provisioning workflow",
   "scripts": {

@@ -6,7 +6,7 @@ const vector = require('./vector.json');
 const { generateRosterKeyPair, keyId, openSealed } = require('../scripts/roster-crypto');
 
 test('opens a record sealed by the ClassRepo server (interop vector)', () => {
-  // vector.json is produced by class-repo-server/src/lib/seal.js. If either side changes the format, this fails.
+  // vector.json is produced by server/src/lib/seal.js in class-repo-site. If either side changes the format, this fails.
   assert.deepEqual(openSealed(vector.sealed, vector.privateKeyPem), vector.record);
 });
 

@@ -31,7 +31,7 @@ jobs:
           private-key: ${{ secrets.CLASSREPO_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
-      - name: Checkout Automator Repository
+      - name: Checkout Bot Repository
         uses: actions/checkout@v4
 
       - name: Run job

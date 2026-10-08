@@ -235,8 +235,8 @@ async function run({ github, context, core, env = process.env, deps = {} }) {
     const git = (args, cwd) => execFile('git', args, { cwd, stdio: 'pipe', env });
     try {
       git(['clone', '--depth', '1', `https://x-access-token:${env.EXECUTOR_TOKEN}@github.com/${owner}/${trackingRepo}.git`, dir]);
-      git(['config', 'user.name', 'ClassRepo Automator'], dir);
-      git(['config', 'user.email', 'automator@classrepo.internal'], dir);
+      git(['config', 'user.name', 'ClassRepo Bot'], dir);
+      git(['config', 'user.email', 'bot@classrepo.internal'], dir);
       git(['checkout', '-B', 'main'], dir);
 
       const logsDir = path.join(dir, 'logs', assignment);

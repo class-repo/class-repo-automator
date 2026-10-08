@@ -3,7 +3,7 @@
 //
 // The server seals each student's { github, name, email } to this repo's roster PUBLIC key, so the server
 // (and its queue and database) can never read it. The private key lives only in this repo's Actions secret
-// CLASSREPO_ROSTER_PRIVATE_KEY. Format (matches class-repo-server/src/lib/seal.js):
+// CLASSREPO_ROSTER_PRIVATE_KEY. Format (matches server/src/lib/seal.js in class-repo-site):
 //   v1.<keyId>.<RSA-OAEP(SHA-256) wrapped AES key>.<iv>.<AES-256-GCM ciphertext+tag>     (base64url parts)
 
 const crypto = require('crypto');

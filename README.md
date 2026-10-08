@@ -1,4 +1,4 @@
-# ClassRepo Automator
+# ClassRepo Bot
 
 This repository serves strictly as a **GitHub Actions Runner** for ClassRepo. It contains no application logic or web server, only a `.github/workflows/provision.yml` workflow and an optional local script (`scripts/provision.sh`).
 
@@ -13,7 +13,7 @@ By offloading the heavy lifting to GitHub Actions, we get:
 
 ## How it works
 
-1.  When a student joins an assignment (or an educator uploads a roster), the `class-repo-server` encrypts the student's details to this repository's **roster key**, stores the job, and dispatches `provision.yml` with only a random `batch_id` and the server URL.
+1.  When a student joins an assignment (or an educator uploads a roster), the ClassRepo server (`server/` in [`class-repo-site`](https://github.com/class-repo/class-repo-site)) encrypts the student's details to this repository's **roster key**, stores the job, and dispatches `provision.yml` with only a random `batch_id` and the server URL.
 2.  The workflow asks GitHub for an **OIDC token** (`permissions: id-token: write`) and uses it to fetch the job from the server. The server only answers runs of this repository's own `provision.yml`.
 3.  `scripts/provision.js` opens each student's record with the private key (the `CLASSREPO_ROSTER_PRIVATE_KEY` secret), looks up the account's **current** GitHub handle from its numeric id (so a renamed student is still invited, and a re-registered handle never reaches the wrong person), creates a private repository from the template (`{assignment}-{student-handle}`) with the Executor App token, and invites the student.
 4.  It reports `ready` or `failed` (with a short generic reason) for each student, again with an OIDC token. The job fails if any student failed.
@@ -44,7 +44,7 @@ Keep write access to this repository small: anyone who can edit the workflow can
 
 `.github/dependabot.yml` proposes pull requests when the actions used by `provision.yml` have new versions. Review and merge them; do not delete the file unless you replace it with your own update process.
 
-`provision.yml` calls `scripts/provision.js` and `scripts/roster-crypto.js` from this repository, so an update means copying **`.github/workflows/provision.yml` and the `scripts/` folder** from the template repository (`class-repo/class-repo-automator`). Nothing changes until you do.
+`provision.yml` calls `scripts/provision.js` and `scripts/roster-crypto.js` from this repository, so an update means copying **`.github/workflows/provision.yml` and the `scripts/` folder** from the template repository (`class-repo/class-repo-bot`). Nothing changes until you do.
 
 ## Tests
 
