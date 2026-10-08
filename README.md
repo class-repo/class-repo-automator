@@ -15,7 +15,7 @@ By offloading the heavy lifting to GitHub Actions, we get:
 
 1.  When a student joins an assignment (or an educator uploads a roster), the `class-repo-server` encrypts the student's details to this repository's **roster key**, stores the job, and dispatches `provision.yml` with only a random `batch_id` and the server URL.
 2.  The workflow asks GitHub for an **OIDC token** (`permissions: id-token: write`) and uses it to fetch the job from the server. The server only answers runs of this repository's own `provision.yml`.
-3.  `scripts/provision.js` opens each student's record with the private key (the `CLASSREPO_ROSTER_PRIVATE_KEY` secret), creates a private repository from the template (`{assignment}-{student-handle}`) with the Executor App token, and invites the student.
+3.  `scripts/provision.js` opens each student's record with the private key (the `CLASSREPO_ROSTER_PRIVATE_KEY` secret), looks up the account's **current** GitHub handle from its numeric id (so a renamed student is still invited, and a re-registered handle never reaches the wrong person), creates a private repository from the template (`{assignment}-{student-handle}`) with the Executor App token, and invites the student.
 4.  It reports `ready` or `failed` (with a short generic reason) for each student, again with an OIDC token. The job fails if any student failed.
 5.  The roster (handle, name, email, repo, time) is written to your **private** tracking repository, and skipped if that repository is public.
 
