@@ -1,6 +1,7 @@
 version: 2
 updates:
-  # Keeps the actions used by provision.yml up to date (tags are bumped through reviewed pull requests).
+  # Proposes a pull request when a new version of the ClassRepo bot action is released.
+  # Read the changes before you merge: the action runs with your GitHub App's permissions.
   - package-ecosystem: github-actions
     directory: /
     schedule:
