@@ -1,22 +1,27 @@
 # ClassRepo Bot
 
-This repository serves strictly as a **GitHub Actions Runner** for ClassRepo. It contains no application logic or web server, only a `.github/workflows/provision.yml` workflow and an optional local script (`scripts/provision.sh`).
+This repository is where ClassRepo's work happens on **your** side. It holds a small GitHub Actions workflow (`.github/workflows/provision.yml`) and the script it runs (`scripts/`). The ClassRepo server decides *when* a job runs and *which* students it is for; this bot does the creating, using keys that never leave your GitHub account.
+
+## What the bot will and will not do
+
+The bot enforces these rules itself, whatever the server asks:
+
+* Repositories are only ever created **private**, from the template named in the job (and only from owners in your allow-list, if you set one).
+* Students get **at most push access** (or read-only). The bot never grants admin, maintain or triage.
+* It **never deletes** anything and **never changes a repository's visibility**.
+* It **only touches repositories ClassRepo created**: ones with the `classrepo` topic, or generated from the job's template. If a repository merely has a matching name, it is left alone and the student is told it could not be done.
+* If a job asks for something this version of the bot does not understand, the **whole job is refused** with an "update your bot" message, rather than being half done.
 
 ## Why this exists
 
-Creating a GitHub repository, copying files from a template, adding collaborators, and sending invitations requires many sequential GitHub API calls. Doing this inside a Cloudflare Worker directly would risk hitting Cloudflare's strict CPU time limits and GitHub's secondary rate limits. 
-
-By offloading the heavy lifting to GitHub Actions, we get:
-1.  **Generous execution limits**: Actions can run for up to 6 hours.
-2.  **Built-in parallelization**: Matrix jobs allow provisioning hundreds of student repos concurrently.
-3.  **Local GitHub API locality**: Actions run inside GitHub's infrastructure, significantly reducing latency and rate limit issues compared to external API calls.
+Creating a GitHub repository, copying files from a template, adding collaborators, and sending invitations requires many sequential GitHub API calls. Doing this inside a Cloudflare Worker directly would risk hitting Cloudflare's strict CPU time limits and GitHub's secondary rate limits. Running it in GitHub Actions in your own account gives generous execution limits and keeps the powerful key (the Executor App's) with you.
 
 ## How it works
 
 1.  When a student joins an assignment (or an educator uploads a roster), the ClassRepo server (`server/` in [`class-repo-site`](https://github.com/class-repo/class-repo-site)) encrypts the student's details to this repository's **roster key**, stores the job, and dispatches `provision.yml` with only a random `batch_id` and the server URL.
 2.  The workflow asks GitHub for an **OIDC token** (`permissions: id-token: write`) and uses it to fetch the job from the server. The server only answers runs of this repository's own `provision.yml`.
-3.  `scripts/provision.js` opens each student's record with the private key (the `CLASSREPO_ROSTER_PRIVATE_KEY` secret), looks up the account's **current** GitHub handle from its numeric id (so a renamed student is still invited, and a re-registered handle never reaches the wrong person), creates a private repository from the template (`{assignment}-{student-handle}`) with the Executor App token, and invites the student.
-4.  It reports `ready` or `failed` (with a short generic reason) for each student, again with an OIDC token. The job fails if any student failed.
+3.  `scripts/provision.js` introduces itself to the server (its version and what it supports), then does one kind of job: **make these repositories look like this**. For each repository it opens the students' records with the private key (the `CLASSREPO_ROSTER_PRIVATE_KEY` secret), looks up each account's **current** GitHub handle from its numeric id (so a renamed student is still invited, and a re-registered handle never reaches the wrong person), creates the repository if it is missing (`{assignment}-{student-handle}`, private, labelled `classrepo`), and corrects whatever differs: collaborators and their access, whether Actions is on, the Codespaces badge, and archiving. Running a job twice is harmless.
+4.  It reports `ready` or `failed` (with a short generic reason) for each repository, again with an OIDC token. The job fails if any student failed.
 5.  The roster (handle, name, email, repo, time) is written to your **private** tracking repository, and skipped if that repository is public.
 
 ## This repository can be public

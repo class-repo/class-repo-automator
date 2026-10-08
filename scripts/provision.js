@@ -1,11 +1,20 @@
 'use strict';
 // Logic for .github/workflows/provision.yml, kept in a file so it can be tested.
 //
+// THE RULES THIS BOT ENFORCES ITSELF, whatever the server asks (the server is not trusted with the Executor App's
+// authority, only with deciding WHEN to run and WHICH students):
+//   - repositories are only ever created private, from the template named in the job (and the allow-list, if set);
+//   - collaborators get at most "push" access; nothing is ever deleted; visibility is never changed;
+//   - it only touches repositories ClassRepo made: ones carrying the `classrepo` topic, or generated from this job's
+//     template. A repository that merely has a matching name is left alone.
+//   - a job using anything this bot does not understand is refused as a whole, with a clear "update your bot" message,
+//     rather than being half-done.
+//
 // This repository may be PUBLIC, which makes the workflow's inputs, logs and annotations public too. So:
 //   - the dispatch carries only a batch id; the job is fetched from the ClassRepo server with the run's
 //     GitHub OIDC token, and student records arrive sealed to this repo's roster key (roster-crypto.js);
 //   - nothing identifying (handles, names, emails, template, assignment, owner) is ever logged: progress is
-//     reported by position ("student 3 of 40") and every sensitive value is registered as a masked secret.
+//     reported by position ("repository 3 of 40") and every sensitive value is registered as a masked secret.
 //   - the roster itself is only written to the educator's PRIVATE tracking repository.
 
 const fs = require('fs');
@@ -13,6 +22,28 @@ const os = require('os');
 const path = require('path');
 const childProcess = require('child_process');
 const { generateRosterKeyPair, openSealed } = require('./roster-crypto');
+const { version: BOT_VERSION } = require('../package.json');
+
+// Job format version. A newer server keeps sending protocol 2 jobs to bots that list 2, so bots can lag safely.
+const PROTOCOL = 2;
+const MAX_REPOS = 200;
+const MAX_COLLABORATORS = 10;
+const ALLOWED_PERMISSIONS = ['pull', 'push'];
+const SUPPORTED_SETTINGS = ['actions_enabled', 'codespaces_badge', 'archived'];
+const SUPPORTED_REPO_FIELDS = ['sync_key', 'collaborators', 'settings'];
+const MARKER_TOPIC = 'classrepo';
+
+// What this bot can do. The server only asks for what is listed here, and tells the educator when the bot is too old.
+const BOT = {
+  version: BOT_VERSION,
+  protocols: [PROTOCOL],
+  capabilities: [
+    'ensure_repos', 'setup_keys', 'collaborators:multiple', ...ALLOWED_PERMISSIONS.map(p => `permission:${p}`),
+    ...SUPPORTED_SETTINGS.map(k => `setting:${k}`), 'marker:topic',
+  ],
+};
+
+const OUTDATED = "Your instructor's ClassRepo bot needs updating, so this could not be done. Please let them know.";
 
 const HANDLE_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const NAME_RE = /^[A-Za-z0-9._-]{1,60}$/;
@@ -44,14 +75,48 @@ async function run({ github, context, core, env = process.env, deps = {} }) {
   }
   const mask = value => { if (value && String(value).length >= 3) core.setSecret(String(value)); };
 
-  const claim = await call('claim');
+  // Claiming the job also tells the server which bot this is, so it can offer only what this bot supports.
+  const claim = await call('claim', { bot: BOT });
   if (!claim.ok) return core.setFailed(`Could not fetch the job from the ClassRepo server (HTTP ${claim.status}).`);
   const job = await claim.json();
   [job.template, job.assignment_name, job.target_owner, job.shortcode].forEach(mask);
 
   if (job.mode === 'setup_keys') return setupKeys();
-  if (job.mode === 'student_join') return provision();
-  return core.setFailed('Unknown job type.');
+  if (job.mode === 'ensure_repos') return ensureRepos();
+  await reportAll(OUTDATED);
+  return core.setFailed('This job type is not supported by this version of the bot. Update the bot.');
+
+  // Tells every waiting student the job could not be done (used when the whole job is refused).
+  async function reportAll(message) {
+    const entries = Array.isArray(job.repos) ? job.repos : [];
+    const results = entries.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry && entry.sync_key)
+      .map(({ index }) => ({ index, status: 'failed', error: message }));
+    if (results.length === 0) return;
+    try { await call('results', { results }); } catch { core.warning('Could not send a status report to the server.'); }
+  }
+
+  // Looks at a whole job BEFORE touching GitHub. Returns null if it is acceptable, or { message, student }.
+  function refuseJob() {
+    if (job.protocol !== PROTOCOL) return { message: `The job uses protocol ${job.protocol}; this bot supports ${BOT.protocols.join(', ')}. Update the bot.`, student: OUTDATED };
+    const repos = job.repos;
+    if (!Array.isArray(repos) || repos.length === 0 || repos.length > MAX_REPOS) return { message: 'The job lists no repositories, or too many.', student: 'This could not be done.' };
+    // Anything this bot does not know about makes it refuse everything, so nothing is half-done.
+    for (const spec of repos) {
+      if (!spec || typeof spec !== 'object') return { message: 'The job is malformed.', student: 'This could not be done.' };
+      const unknownField = Object.keys(spec).find(k => !SUPPORTED_REPO_FIELDS.includes(k));
+      const unknownSetting = Object.keys(spec.settings || {}).find(k => !SUPPORTED_SETTINGS.includes(k));
+      if (unknownField || unknownSetting) return { message: 'The job uses a feature this bot does not have. Update the bot.', student: OUTDATED };
+    }
+    for (const spec of repos) {
+      const people = spec.collaborators;
+      if (!Array.isArray(people) || people.length === 0 || people.length > MAX_COLLABORATORS) return { message: 'A repository has no collaborators, or too many.', student: 'This could not be done.' };
+      if (people.some(p => !p || typeof p.sealed !== 'string' || !ALLOWED_PERMISSIONS.includes(p.permission))) {
+        return { message: `The job asks for a permission this bot never grants (it grants only: ${ALLOWED_PERMISSIONS.join(', ')}).`, student: 'This could not be done.' };
+      }
+      if (Object.values(spec.settings || {}).some(v => typeof v !== 'boolean')) return { message: 'A repository setting is not true or false.', student: 'This could not be done.' };
+    }
+    return null;
+  }
 
   // ---------------------------------------------------------------------------------------------
   // setup_keys: create the roster key pair here. The private key goes straight into this repo's
@@ -76,15 +141,21 @@ async function run({ github, context, core, env = process.env, deps = {} }) {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // student_join: create one private repository per student and invite them.
+  // ensure_repos: make these repositories look like the job says. Creates what is missing and corrects what differs,
+  // so running the same job twice is harmless.
   // ---------------------------------------------------------------------------------------------
-  async function provision() {
+  async function ensureRepos() {
     const assignment = job.assignment_name;
     const template = job.template;
     const owner = job.target_owner || context.repo.owner;
-    const students = Array.isArray(job.students) ? job.students : [];
+    const repos = Array.isArray(job.repos) ? job.repos : [];
     const trackingRepo = env.TRACKING_REPO || 'class-repo-tracking';
 
+    const refusal = refuseJob();
+    if (refusal) {
+      await reportAll(refusal.student);
+      return core.setFailed(refusal.message);
+    }
     if (!NAME_RE.test(assignment || '') || !TEMPLATE_RE.test(template || '') || !HANDLE_RE.test(owner) || !NAME_RE.test(trackingRepo)) {
       return core.setFailed('The job contains invalid names.');
     }
@@ -92,61 +163,115 @@ async function run({ github, context, core, env = process.env, deps = {} }) {
     if (allowedOwners.length && !allowedOwners.includes(template.split('/')[0].toLowerCase())) {
       return core.setFailed('The template owner is not in this repository\'s allowed list (CLASSREPO_ALLOWED_TEMPLATE_OWNERS).');
     }
-    if (!env.ROSTER_PRIVATE_KEY) return core.setFailed('No roster key is configured. Use "Enable encrypted roster" in the ClassRepo dashboard.');
+    if (!env.ROSTER_PRIVATE_KEY) return core.setFailed('No roster key is configured. Use "Turn on the encrypted roster" in the ClassRepo dashboard.');
 
     const [templateOwner, templateRepo] = template.split('/');
     const logDir = path.join(tmp, 'logs_generated');
     fs.mkdirSync(logDir, { recursive: true });
 
-    async function currentHandle(record) {
-      if (record.github_id == null) return record.github; // records sealed before ids were added
-      let login;
+    // Opens one sealed collaborator record and works out the handle the account has NOW. The account id never changes
+    // but the handle can, so a renamed student is still invited and a re-registered handle never reaches the wrong person.
+    async function resolvePerson(collaborator) {
+      let record;
       try {
-        login = (await github.rest.users.getById({ account_id: Number(record.github_id) })).data.login;
-      } catch (e) {
-        throw new Error(e.status === 404 ? 'That GitHub account no longer exists.' : `Could not look up the GitHub account (HTTP ${e.status || 'error'}).`);
+        record = openSealed(collaborator.sealed, env.ROSTER_PRIVATE_KEY);
+        if (!record || !HANDLE_RE.test(record.github)) throw new Error('bad record');
+      } catch {
+        const error = new Error('Your details could not be processed. Please ask your instructor to check the encrypted roster setup.');
+        error.log = "could not open the student's record (was the roster key replaced?).";
+        throw error;
       }
-      if (!HANDLE_RE.test(String(login))) throw new Error('Could not look up the GitHub account.');
-      return login;
+      [record.github, record.name, record.email].forEach(mask);
+      if (record.github_id != null) {
+        let login;
+        try {
+          login = (await github.rest.users.getById({ account_id: Number(record.github_id) })).data.login;
+        } catch (e) {
+          throw new Error(e.status === 404 ? 'That GitHub account no longer exists.' : `Could not look up the GitHub account (HTTP ${e.status || 'error'}).`);
+        }
+        if (!HANDLE_RE.test(String(login))) throw new Error('Could not look up the GitHub account.');
+        record.github = login;
+        mask(login);
+      }
+      return { record, permission: collaborator.permission };
+    }
+
+    // Labels a repository as ClassRepo's. Best effort: a repository generated from this template is recognised anyway.
+    async function mark(repoName, existingTopics = []) {
+      try {
+        await github.rest.repos.replaceAllTopics({ owner, repo: repoName, names: [...new Set([...existingTopics, MARKER_TOPIC])] });
+      } catch {
+        core.warning('Could not label one repository as created by ClassRepo.');
+      }
     }
 
     // Throws an Error with a short message that is safe to show to the student and to log.
-    async function provisionStudent(record) {
-      const repoName = `${assignment}-${record.github}`;
-      let exists = false;
+    async function ensureRepo(spec, people) {
+      const settings = spec.settings || {};
+      const repoName = `${assignment}-${people[0].record.github}`; // a repository is named after its first collaborator
+
+      let existing = null;
       try {
-        await github.rest.repos.get({ owner, repo: repoName });
-        exists = true;
+        existing = (await github.rest.repos.get({ owner, repo: repoName })).data;
       } catch (e) {
         if (e.status !== 404) throw new Error(`Could not check for an existing repository (HTTP ${e.status || 'error'}).`);
       }
-      if (!exists) {
+
+      if (!existing) {
         try {
           await github.rest.repos.createUsingTemplate({ template_owner: templateOwner, template_repo: templateRepo, owner, name: repoName, private: true, include_all_branches: false });
         } catch (e) {
           throw new Error(`Could not create the repository from the template (HTTP ${e.status || 'error'}).`);
         }
+        await mark(repoName);
+        existing = { archived: false };
+      } else {
+        // A repository that only has a matching NAME is not ours to change, however the name came about.
+        const topics = existing.topics || [];
+        const generatedFromTemplate = !!existing.template_repository
+          && String(existing.template_repository.full_name).toLowerCase() === template.toLowerCase();
+        if (!topics.includes(MARKER_TOPIC) && !generatedFromTemplate) {
+          throw new Error('A repository with that name already exists and was not created by ClassRepo, so it was left alone.');
+        }
+        if (!topics.includes(MARKER_TOPIC)) await mark(repoName, topics);
       }
-      try {
-        await github.rest.repos.addCollaborator({ owner, repo: repoName, username: record.github, permission: 'push' });
-      } catch (e) {
-        throw new Error(`The repository exists, but sending the invitation failed (HTTP ${e.status || 'error'}).`);
-      }
-      if (job.add_codespaces) await addCodespacesBadge(repoName); // best effort
-      if (job.disable_actions) await disableActions(repoName); // best effort
 
-      const lines = [`github_id: ${record.github_id == null ? '' : record.github_id}`, `github_handle: ${record.github}`, `name: ${oneLine(record.name)}`, `email: ${oneLine(record.email) || 'no-email'}`,
-        `created_at: ${new Date().toISOString()}`, `repo: ${owner}/${repoName}`];
-      fs.writeFileSync(path.join(logDir, `${record.github}.txt`), lines.join('\n'));
+      if (existing.archived) {
+        if (settings.archived === true) return writeRoster(people, repoName); // already as asked
+        if (settings.archived !== false) throw new Error('This repository has been archived.');
+        try { await github.rest.repos.update({ owner, repo: repoName, archived: false }); } catch (e) { throw new Error(`Could not reopen the archived repository (HTTP ${e.status || 'error'}).`); }
+      }
+
+      for (const { record, permission } of people) {
+        try {
+          await github.rest.repos.addCollaborator({ owner, repo: repoName, username: record.github, permission });
+        } catch (e) {
+          throw new Error(`The repository exists, but sending the invitation failed (HTTP ${e.status || 'error'}).`);
+        }
+      }
+      if (settings.actions_enabled !== undefined) await setActions(repoName, settings.actions_enabled); // best effort
+      if (settings.codespaces_badge === true) await addCodespacesBadge(repoName); // best effort
+      writeRoster(people, repoName);
+      if (settings.archived === true) {
+        try { await github.rest.repos.update({ owner, repo: repoName, archived: true }); } catch (e) { throw new Error(`Could not archive the repository (HTTP ${e.status || 'error'}).`); }
+      }
+    }
+
+    function writeRoster(people, repoName) {
+      for (const { record, permission } of people) {
+        const lines = [`github_id: ${record.github_id == null ? '' : record.github_id}`, `github_handle: ${record.github}`, `name: ${oneLine(record.name)}`, `email: ${oneLine(record.email) || 'no-email'}`,
+          `permission: ${permission}`, `created_at: ${new Date().toISOString()}`, `repo: ${owner}/${repoName}`];
+        fs.writeFileSync(path.join(logDir, `${record.github}.txt`), lines.join('\n'));
+      }
     }
 
     // Students have write access, so they could add workflows that spend the organization's Actions minutes or
     // read organization-wide secrets. Educators who don't need autograding can turn Actions off per assignment.
-    async function disableActions(repoName) {
+    async function setActions(repoName, enabled) {
       try {
-        await github.rest.actions.setGithubActionsPermissionsRepository({ owner, repo: repoName, enabled: false });
+        await github.rest.actions.setGithubActionsPermissionsRepository({ owner, repo: repoName, enabled });
       } catch {
-        core.warning('Could not turn off GitHub Actions in one student repository.');
+        core.warning('Could not change the GitHub Actions setting of one repository.');
       }
     }
 
@@ -167,7 +292,7 @@ async function run({ github, context, core, env = process.env, deps = {} }) {
     }
 
     async function report(index, status, error) {
-      if (!students[index].sync_key) return; // bulk roster rows: nobody is waiting
+      if (!repos[index].sync_key) return; // bulk roster rows: nobody is waiting
       try {
         const res = await call('results', { results: [{ index, status, error }] });
         if (!res.ok) core.warning(`The server rejected a status report (HTTP ${res.status}).`);
@@ -177,37 +302,23 @@ async function run({ github, context, core, env = process.env, deps = {} }) {
     }
 
     let failed = 0;
-    for (const [index, student] of students.entries()) {
-      const label = `student ${index + 1} of ${students.length}`;
-      let record;
+    for (const [index, spec] of repos.entries()) {
+      const label = `repository ${index + 1} of ${repos.length}`;
       try {
-        record = openSealed(student.sealed, env.ROSTER_PRIVATE_KEY);
-        if (!record || !HANDLE_RE.test(record.github)) throw new Error('bad record');
-      } catch {
-        failed++;
-        core.error(`${label}: could not open the student's record (was the roster key replaced?).`);
-        await report(index, 'failed', 'Your details could not be processed. Please ask your instructor to check the encrypted roster setup.');
-        continue;
-      }
-      [record.github, record.name, record.email].forEach(mask);
-
-      try {
-        // The account id never changes but the handle can. Use the handle the account has NOW, so a student who renamed
-        // between joining and provisioning is still invited (and a recycled handle never reaches the wrong person).
-        record.github = await currentHandle(record);
-        mask(record.github);
-        await provisionStudent(record);
+        const people = [];
+        for (const collaborator of spec.collaborators) people.push(await resolvePerson(collaborator));
+        await ensureRepo(spec, people);
         core.info(`${label}: done`);
         await report(index, 'ready');
       } catch (e) {
         failed++;
-        core.error(`${label}: ${e.message}`);
+        core.error(`${label}: ${e.log || e.message}`);
         await report(index, 'failed', e.message);
       }
     }
 
     await pushTracking({ owner, trackingRepo, assignment, logDir });
-    if (failed > 0) core.setFailed(`${failed} of ${students.length} student(s) failed.`);
+    if (failed > 0) core.setFailed(`${failed} of ${repos.length} repositories failed.`);
   }
 
   // Records the roster in the educator's PRIVATE tracking repository (creating it if needed).

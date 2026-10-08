@@ -23,8 +23,15 @@ function seal(publicKeyB64, record) {
 
 const SENSITIVE = ['alice-gh', 'Alice Smith', 'alice@univ.edu', 'bob-gh', 'Bob Jones', 'bob@univ.edu', 'cs101/starter', 'lab1', 'cs101-org'];
 const BATCH = 'AbCdEfGhIjKlMnOpQrStUv';
+const TEMPLATE = 'cs101/starter';
 
-function setup({ job, privateKeyPem, githubOverrides = {}, serverStatus = 200, execFile } = {}) {
+// A GitHub whose every method must be one the bot is meant to use: reaching for anything else (deleting a repository,
+// changing visibility, ...) throws, so those rules are checked by the tests rather than only promised.
+const strict = (name, target) => new Proxy(target, {
+  get(t, prop) { if (!(prop in t)) throw new Error(`UNEXPECTED GITHUB CALL: ${name}.${String(prop)}`); return t[prop]; },
+});
+
+function setup({ job, privateKeyPem, githubOverrides = {}, serverStatus = 200, execFile, existing = {} } = {}) {
   const logs = [];
   const record = (level) => (msg) => logs.push(`${level}: ${msg}`);
   const secrets = [];
@@ -33,23 +40,56 @@ function setup({ job, privateKeyPem, githubOverrides = {}, serverStatus = 200, e
     setFailed: record('FAILED'), setSecret: s => secrets.push(s), getIDToken: async aud => `oidc-for-${aud}`,
   };
   const calls = [];
-  const repos = new Set();
-  const github = {
-    rest: {
-      repos: {
-        get: async ({ repo }) => { if (repo === 'class-repo-tracking') return { data: { private: true } }; if (repos.has(repo)) return {}; const e = new Error('nf'); e.status = 404; throw e; },
-        createUsingTemplate: async a => { calls.push(['create', a.name]); if (githubOverrides.create) await githubOverrides.create(a); repos.add(a.name); },
-        addCollaborator: async a => { calls.push(['invite', a.username]); if (githubOverrides.invite) await githubOverrides.invite(a); },
-        getContent: async () => { const e = new Error('nf'); e.status = 404; throw e; },
-        createOrUpdateFileContents: async a => { calls.push(['badge', a.repo]); },
+  // Repositories that exist on "GitHub": name -> what repos.get returns. Pass `existing` to pre-seed some.
+  const repos = new Map(Object.entries(existing));
+  const notFound = () => { const e = new Error('nf'); e.status = 404; return e; };
+  const github = strict('github', { rest: strict('rest', {
+    repos: strict('repos', {
+      get: async ({ repo }) => {
+        if (repo === 'class-repo-tracking') return { data: { private: true } };
+        if (!repos.has(repo)) throw notFound();
+        return { data: repos.get(repo) };
       },
-      users: {
-        getByUsername: async () => ({ data: { type: 'Organization' } }),
-        getById: async ({ account_id }) => { calls.push(['lookup', account_id]); if (githubOverrides.lookup) return githubOverrides.lookup(account_id); return { data: { login: (githubOverrides.logins || {})[account_id] || `user${account_id}` } }; },
+      createUsingTemplate: async a => {
+        calls.push(['create', a.name, a.private]);
+        if (githubOverrides.create) await githubOverrides.create(a);
+        repos.set(a.name, { topics: [], archived: false, private: true, template_repository: { full_name: `${a.template_owner}/${a.template_repo}` } });
+        return { data: {} };
       },
-      actions: { setGithubActionsPermissionsRepository: async a => { calls.push(['actions', a.repo, a.enabled]); if (githubOverrides.actions) await githubOverrides.actions(a); } },
-    },
-  };
+      replaceAllTopics: async a => {
+        calls.push(['topics', a.repo, a.names]);
+        if (githubOverrides.topics) await githubOverrides.topics(a);
+        repos.get(a.repo).topics = a.names;
+        return { data: {} };
+      },
+      addCollaborator: async a => {
+        calls.push(['invite', a.username, a.permission]);
+        if (githubOverrides.invite) await githubOverrides.invite(a);
+      },
+      update: async a => {
+        calls.push(['archived', a.repo, a.archived]);
+        if (githubOverrides.update) await githubOverrides.update(a);
+        repos.get(a.repo).archived = a.archived;
+      },
+      getContent: async () => { throw notFound(); },
+      createOrUpdateFileContents: async a => { calls.push(['badge', a.repo]); },
+      createInOrg: async () => ({ data: { private: true } }),
+    }),
+    users: strict('users', {
+      getByUsername: async () => ({ data: { type: 'Organization' } }),
+      getById: async ({ account_id }) => {
+        calls.push(['lookup', account_id]);
+        if (githubOverrides.lookup) return githubOverrides.lookup(account_id);
+        return { data: { login: (githubOverrides.logins || {})[account_id] || `user${account_id}` } };
+      },
+    }),
+    actions: strict('actions', {
+      setGithubActionsPermissionsRepository: async a => {
+        calls.push(['actions', a.repo, a.enabled]);
+        if (githubOverrides.actions) await githubOverrides.actions(a);
+      },
+    }),
+  }) });
   const requests = [];
   const fetch = async (url, init) => {
     const body = JSON.parse(init.body);
@@ -65,28 +105,56 @@ function setup({ job, privateKeyPem, githubOverrides = {}, serverStatus = 200, e
     TRACKING_REPO: 'class-repo-tracking', RUNNER_TEMP: tmpDir,
   };
   const context = { repo: { owner: 'cs101-org', repo: 'class-repo-bot' } };
-  return { logs, secrets, core, github, deps, env, context, calls, requests, exec, tmpDir };
+  return { logs, secrets, core, github, deps, env, context, calls, requests, exec, tmpDir, repos };
 }
 
+// One repository entry of a protocol 2 job. `who` is a sealed record's contents.
+const repoEntry = (pair, who, { sync_key = null, permission = 'push', settings = {}, more = [] } = {}) => ({
+  sync_key,
+  collaborators: [{ sealed: seal(pair.publicKeyB64, who), permission }, ...more.map(m => ({ sealed: seal(pair.publicKeyB64, m.who), permission: m.permission || 'push' }))],
+  settings,
+});
+
 const baseJob = (pair, extra = {}) => ({
-  mode: 'student_join', template: 'cs101/starter', assignment_name: 'lab1', target_owner: 'cs101-org', add_codespaces: false, shortcode: 'abc123xyz',
-  students: [
-    { sealed: seal(pair.publicKeyB64, { github: 'alice-gh', name: 'Alice Smith', email: 'alice@univ.edu' }), sync_key: 'k1' },
-    { sealed: seal(pair.publicKeyB64, { github: 'bob-gh', name: 'Bob Jones', email: 'bob@univ.edu' }), sync_key: null },
+  protocol: 2, mode: 'ensure_repos', template: TEMPLATE, assignment_name: 'lab1', target_owner: 'cs101-org', shortcode: 'abc123xyz',
+  repos: [
+    repoEntry(pair, { github: 'alice-gh', name: 'Alice Smith', email: 'alice@univ.edu' }, { sync_key: 'k1' }),
+    repoEntry(pair, { github: 'bob-gh', name: 'Bob Jones', email: 'bob@univ.edu' }),
   ],
   ...extra,
 });
 
-const exercise = (t) => run({ github: t.github, context: t.context, core: t.core, env: t.env, deps: t.deps });
-const results = t => t.requests.filter(r => r.url.endsWith('/results')).map(r => r.body.results[0]);
+const oneRepo = (pair, who, opts, extra = {}) => ({ ...baseJob(pair), repos: [repoEntry(pair, who, { sync_key: 'k1', ...opts })], ...extra });
+const ALICE = { github: 'alice-gh', name: 'Alice Smith', email: 'alice@univ.edu' };
 
-test('creates a repo per decrypted student, invites them, and reports results by position', async () => {
+const exercise = (t) => run({ github: t.github, context: t.context, core: t.core, env: t.env, deps: t.deps });
+const results = t => t.requests.filter(r => r.url.endsWith('/results')).flatMap(r => r.body.results);
+const failedLines = t => t.logs.filter(l => l.startsWith('FAILED'));
+const githubWrites = t => t.calls.filter(c => c[0] !== 'lookup');
+
+// ------------------------------------------------------------------------------------------------ the normal flow
+
+test('creates a private repo per student, labels it, invites them with push access, and reports results by position', async () => {
   const pair = generateRosterKeyPair();
   const t = setup({ job: baseJob(pair), privateKeyPem: pair.privateKeyPem });
   await exercise(t);
-  assert.deepEqual(t.calls, [['create', 'lab1-alice-gh'], ['invite', 'alice-gh'], ['create', 'lab1-bob-gh'], ['invite', 'bob-gh']]);
+  assert.deepEqual(t.calls, [
+    ['create', 'lab1-alice-gh', true], ['topics', 'lab1-alice-gh', ['classrepo']], ['invite', 'alice-gh', 'push'],
+    ['create', 'lab1-bob-gh', true], ['topics', 'lab1-bob-gh', ['classrepo']], ['invite', 'bob-gh', 'push'],
+  ]);
   assert.deepEqual(results(t), [{ index: 0, status: 'ready' }]); // bob is a bulk row: nobody is waiting
-  assert.ok(!t.logs.some(l => l.startsWith('FAILED')));
+  assert.deepEqual(failedLines(t), []);
+});
+
+test('says which bot it is when it claims the job, so the server only asks for what it supports', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: baseJob(pair), privateKeyPem: pair.privateKeyPem });
+  await exercise(t);
+  const claim = t.requests.find(r => r.url.endsWith('/claim')).body.bot;
+  assert.match(claim.version, /^\d+\.\d+\.\d+$/);
+  assert.deepEqual(claim.protocols, [2]);
+  for (const c of ['ensure_repos', 'setup_keys', 'permission:push', 'permission:pull', 'setting:archived', 'marker:topic']) assert.ok(claim.capabilities.includes(c), c);
+  assert.ok(!claim.capabilities.some(c => /admin|delete|public|maintain/.test(c)));
 });
 
 test('authenticates every server call with an OIDC token for the server origin', async () => {
@@ -109,15 +177,15 @@ test('NEVER logs anything identifying (the repo may be public)', async () => {
   try { await exercise(t); } finally { console.log = origLog; }
   const everything = [...t.logs, ...printed].join('\n');
   for (const s of SENSITIVE) assert.ok(!everything.includes(s), `log leaked ${JSON.stringify(s)}:\n${everything}`);
-  assert.match(everything, /student 1 of 2: done/);
-  assert.match(everything, /student 2 of 2: The repository exists, but sending the invitation failed/);
+  assert.match(everything, /repository 1 of 2: done/);
+  assert.match(everything, /repository 2 of 2: The repository exists, but sending the invitation failed/);
 });
 
 test('masks sensitive values as secrets', async () => {
   const pair = generateRosterKeyPair();
   const t = setup({ job: baseJob(pair), privateKeyPem: pair.privateKeyPem });
   await exercise(t);
-  for (const s of ['cs101/starter', 'lab1', 'cs101-org', 'abc123xyz', 'alice-gh', 'Alice Smith', 'alice@univ.edu']) assert.ok(t.secrets.includes(s), `${s} not masked`);
+  for (const s of [TEMPLATE, 'lab1', 'cs101-org', 'abc123xyz', 'alice-gh', 'Alice Smith', 'alice@univ.edu']) assert.ok(t.secrets.includes(s), `${s} not masked`);
 });
 
 test('failures are reported generically and fail the job without identities', async () => {
@@ -125,20 +193,211 @@ test('failures are reported generically and fail the job without identities', as
   const t = setup({ job: baseJob(pair), privateKeyPem: pair.privateKeyPem, githubOverrides: { create: async () => { const e = new Error('nope'); e.status = 404; throw e; } } });
   await exercise(t);
   assert.deepEqual(results(t), [{ index: 0, status: 'failed', error: 'Could not create the repository from the template (HTTP 404).' }]);
-  const failed = t.logs.filter(l => l.startsWith('FAILED'));
-  assert.deepEqual(failed, ['FAILED: 2 of 2 student(s) failed.']);
+  assert.deepEqual(failedLines(t), ['FAILED: 2 of 2 repositories failed.']);
 });
 
-test('a record sealed to a different key fails that student only', async () => {
+test('a record sealed to a different key fails that repository only', async () => {
   const pair = generateRosterKeyPair();
   const other = generateRosterKeyPair();
   const job = baseJob(pair);
-  job.students[0].sealed = seal(other.publicKeyB64, { github: 'alice-gh', name: 'A', email: 'a@x' });
+  job.repos[0] = repoEntry(other, ALICE, { sync_key: 'k1' });
   const t = setup({ job, privateKeyPem: pair.privateKeyPem });
   await exercise(t);
   assert.equal(results(t)[0].status, 'failed');
-  assert.deepEqual(t.calls, [['create', 'lab1-bob-gh'], ['invite', 'bob-gh']]);
+  assert.deepEqual(t.calls.map(c => c[0]), ['create', 'topics', 'invite']);
+  assert.ok(t.calls.every(c => !JSON.stringify(c).includes('alice')));
 });
+
+// ------------------------------------------------------------------------------------------------ the rules the bot enforces itself
+
+test('only ever creates private repositories, and never deletes or changes visibility (any other GitHub call would throw)', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: oneRepo(pair, ALICE, { settings: { actions_enabled: true, codespaces_badge: true, archived: true } }), privateKeyPem: pair.privateKeyPem });
+  await exercise(t);
+  assert.deepEqual(failedLines(t), []);
+  assert.ok(t.calls.filter(c => c[0] === 'create').every(c => c[2] === true));
+});
+
+test('never grants more than push: any other permission refuses the whole job before GitHub is touched', async () => {
+  const pair = generateRosterKeyPair();
+  for (const permission of ['admin', 'maintain', 'triage', 'write', 'owner', '']) {
+    const t = setup({ job: oneRepo(pair, ALICE, { permission }), privateKeyPem: pair.privateKeyPem });
+    await exercise(t);
+    assert.deepEqual(t.calls, [], `permission ${JSON.stringify(permission)} reached GitHub`);
+    assert.match(failedLines(t)[0], /never grants/);
+  }
+});
+
+test('allows read-only access (end of term) with the same job shape', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: oneRepo(pair, ALICE, { permission: 'pull' }), privateKeyPem: pair.privateKeyPem, existing: { 'lab1-alice-gh': { topics: ['classrepo'], archived: false } } });
+  await exercise(t);
+  assert.deepEqual(t.calls, [['invite', 'alice-gh', 'pull']]);
+});
+
+test('leaves alone an existing repository that merely has a matching name (a compromised server cannot point the bot at your other repos)', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: oneRepo(pair, ALICE), privateKeyPem: pair.privateKeyPem,
+    existing: { 'lab1-alice-gh': { topics: ['internal'], archived: false, private: true, template_repository: null } } });
+  await exercise(t);
+  assert.deepEqual(t.calls, [], 'must not invite anyone, label, or change anything');
+  assert.deepEqual(results(t), [{ index: 0, status: 'failed', error: 'A repository with that name already exists and was not created by ClassRepo, so it was left alone.' }]);
+});
+
+test('also leaves alone a lookalike generated from a DIFFERENT template', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: oneRepo(pair, ALICE), privateKeyPem: pair.privateKeyPem,
+    existing: { 'lab1-alice-gh': { topics: [], archived: false, template_repository: { full_name: 'someone/else' } } } });
+  await exercise(t);
+  assert.deepEqual(t.calls, []);
+  assert.equal(results(t)[0].status, 'failed');
+});
+
+test('recognises repositories made before labelling existed (generated from this template) and labels them', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: oneRepo(pair, ALICE), privateKeyPem: pair.privateKeyPem,
+    existing: { 'lab1-alice-gh': { topics: ['python'], archived: false, template_repository: { full_name: 'CS101/Starter' } } } });
+  await exercise(t);
+  assert.deepEqual(t.calls, [['topics', 'lab1-alice-gh', ['python', 'classrepo']], ['invite', 'alice-gh', 'push']]);
+  assert.deepEqual(results(t), [{ index: 0, status: 'ready' }]);
+});
+
+test('running the same job twice is harmless: the second run only re-applies what is wanted', async () => {
+  const pair = generateRosterKeyPair();
+  const job = oneRepo(pair, ALICE, { settings: { actions_enabled: false } });
+  const t = setup({ job, privateKeyPem: pair.privateKeyPem });
+  await exercise(t);
+  const afterFirst = t.calls.length;
+  await exercise(t);
+  const second = t.calls.slice(afterFirst);
+  assert.ok(!second.some(c => c[0] === 'create'), 'must not create again');
+  assert.ok(!second.some(c => c[0] === 'topics'), 'must not relabel');
+  assert.deepEqual(second, [['invite', 'alice-gh', 'push'], ['actions', 'lab1-alice-gh', false]]);
+});
+
+test('a failure to label a new repository is only a warning, and the next run still recognises it', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: oneRepo(pair, ALICE), privateKeyPem: pair.privateKeyPem, githubOverrides: { topics: async () => { throw new Error('no'); } } });
+  await exercise(t);
+  assert.deepEqual(results(t), [{ index: 0, status: 'ready' }]);
+  assert.ok(t.logs.some(l => l.startsWith('warning: Could not label')));
+  await exercise(t); // generated from this template, so still recognised
+  assert.equal(results(t).at(-1).status, 'ready');
+});
+
+// ------------------------------------------------------------------------------------------------ settings
+
+test('settings are applied only when present: actions on, off, or untouched', async () => {
+  const pair = generateRosterKeyPair();
+  for (const [settings, expected] of [[{ actions_enabled: false }, [['actions', 'lab1-alice-gh', false]]], [{ actions_enabled: true }, [['actions', 'lab1-alice-gh', true]]], [{}, []]]) {
+    const t = setup({ job: oneRepo(pair, ALICE, { settings }), privateKeyPem: pair.privateKeyPem });
+    await exercise(t);
+    assert.deepEqual(t.calls.filter(c => c[0] === 'actions'), expected);
+  }
+});
+
+test('adds the Codespaces badge only when asked', async () => {
+  const pair = generateRosterKeyPair();
+  const on = setup({ job: oneRepo(pair, ALICE, { settings: { codespaces_badge: true } }), privateKeyPem: pair.privateKeyPem });
+  await exercise(on);
+  assert.deepEqual(on.calls.filter(c => c[0] === 'badge'), [['badge', 'lab1-alice-gh']]);
+  const off = setup({ job: oneRepo(pair, ALICE), privateKeyPem: pair.privateKeyPem });
+  await exercise(off);
+  assert.deepEqual(off.calls.filter(c => c[0] === 'badge'), []);
+});
+
+test('a failure to change a setting is a generic warning, not a failed student, and leaks nothing', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: oneRepo(pair, ALICE, { settings: { actions_enabled: false } }), privateKeyPem: pair.privateKeyPem,
+    githubOverrides: { actions: async () => { throw new Error('forbidden for alice-gh'); } } });
+  await exercise(t);
+  assert.deepEqual(results(t), [{ index: 0, status: 'ready' }]);
+  assert.ok(t.logs.some(l => l.startsWith('warning: Could not change the GitHub Actions setting')));
+  assert.ok(!t.logs.join('\n').includes('alice-gh'));
+  assert.deepEqual(failedLines(t), []);
+});
+
+test('archiving happens last, after the collaborators are set', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: oneRepo(pair, ALICE, { permission: 'pull', settings: { archived: true } }), privateKeyPem: pair.privateKeyPem, existing: { 'lab1-alice-gh': { topics: ['classrepo'], archived: false } } });
+  await exercise(t);
+  assert.deepEqual(t.calls, [['invite', 'alice-gh', 'pull'], ['archived', 'lab1-alice-gh', true]]);
+});
+
+test('an already-archived repository is left as it is when archiving is asked for, and reopened only when asked', async () => {
+  const pair = generateRosterKeyPair();
+  const existing = () => ({ 'lab1-alice-gh': { topics: ['classrepo'], archived: true } });
+  const keep = setup({ job: oneRepo(pair, ALICE, { settings: { archived: true } }), privateKeyPem: pair.privateKeyPem, existing: existing() });
+  await exercise(keep);
+  assert.deepEqual(keep.calls.filter(c => c[0] !== 'lookup'), []);
+  assert.equal(results(keep)[0].status, 'ready');
+
+  const reopen = setup({ job: oneRepo(pair, ALICE, { settings: { archived: false } }), privateKeyPem: pair.privateKeyPem, existing: existing() });
+  await exercise(reopen);
+  assert.deepEqual(reopen.calls, [['archived', 'lab1-alice-gh', false], ['invite', 'alice-gh', 'push']]);
+
+  const silent = setup({ job: oneRepo(pair, ALICE), privateKeyPem: pair.privateKeyPem, existing: existing() });
+  await exercise(silent);
+  assert.deepEqual(silent.calls, []);
+  assert.equal(results(silent)[0].error, 'This repository has been archived.');
+});
+
+test('several collaborators: all are invited with their own permission, and the repository is named after the first', async () => {
+  const pair = generateRosterKeyPair();
+  const job = oneRepo(pair, { github: 'zed', name: 'Z', email: 'z@x' }, { more: [{ who: { github: 'amy', name: 'A', email: 'a@x' }, permission: 'pull' }, { who: { github: 'bo', name: 'B', email: 'b@x' } }] });
+  const t = setup({ job, privateKeyPem: pair.privateKeyPem });
+  await exercise(t);
+  assert.deepEqual(t.calls.filter(c => c[0] === 'create'), [['create', 'lab1-zed', true]]);
+  assert.deepEqual(t.calls.filter(c => c[0] === 'invite'), [['invite', 'zed', 'push'], ['invite', 'amy', 'pull'], ['invite', 'bo', 'push']]);
+  assert.deepEqual(fs.readdirSync(path.join(t.tmpDir, 'logs_generated')).sort(), ['amy.txt', 'bo.txt', 'zed.txt']);
+});
+
+// ------------------------------------------------------------------------------------------------ versions: refuse what we do not understand
+
+test('a job from a newer protocol is refused as a whole, and the waiting students are told the bot needs updating', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: baseJob(pair, { protocol: 3 }), privateKeyPem: pair.privateKeyPem });
+  await exercise(t);
+  assert.deepEqual(t.calls, []);
+  assert.match(failedLines(t)[0], /protocol 3.*Update the bot/);
+  assert.deepEqual(results(t), [{ index: 0, status: 'failed', error: "Your instructor's ClassRepo bot needs updating, so this could not be done. Please let them know." }]);
+});
+
+test('a job using a setting or field this bot does not know is refused before anything is done (never half-done)', async () => {
+  const pair = generateRosterKeyPair();
+  for (const mutate of [r => { r.settings.snapshot_tag = true; }, r => { r.nickname = 'x'; }]) {
+    const job = oneRepo(pair, ALICE);
+    mutate(job.repos[0]);
+    const t = setup({ job, privateKeyPem: pair.privateKeyPem });
+    await exercise(t);
+    assert.deepEqual(t.calls, []);
+    assert.match(failedLines(t)[0], /feature this bot does not have/);
+    assert.equal(results(t)[0].status, 'failed');
+  }
+});
+
+test('refuses empty jobs, oversized jobs and malformed settings', async () => {
+  const pair = generateRosterKeyPair();
+  const tooMany = { ...baseJob(pair), repos: Array.from({ length: 201 }, () => ({ collaborators: [{ sealed: 'x', permission: 'push' }] })) };
+  for (const job of [{ ...baseJob(pair), repos: [] }, tooMany, oneRepo(pair, ALICE, { settings: { archived: 'yes' } })]) {
+    const t = setup({ job, privateKeyPem: pair.privateKeyPem });
+    await exercise(t);
+    assert.deepEqual(t.calls, []);
+    assert.equal(failedLines(t).length, 1);
+  }
+});
+
+test('an unknown job type fails clearly and the old student_join type is not accepted', async () => {
+  const pair = generateRosterKeyPair();
+  for (const mode of ['something-else', 'student_join']) {
+    const t = setup({ job: { ...baseJob(pair), mode }, privateKeyPem: pair.privateKeyPem });
+    await exercise(t);
+    assert.deepEqual(t.calls, []);
+    assert.match(failedLines(t)[0], /not supported by this version of the bot/);
+  }
+});
+
+// ------------------------------------------------------------------------------------------------ job-level checks (unchanged rules)
 
 test('rejects invalid job fields before touching GitHub', async () => {
   const pair = generateRosterKeyPair();
@@ -146,7 +405,7 @@ test('rejects invalid job fields before touching GitHub', async () => {
     const t = setup({ job: baseJob(pair, bad), privateKeyPem: pair.privateKeyPem });
     await exercise(t);
     assert.deepEqual(t.calls, []);
-    assert.deepEqual(t.logs.filter(l => l.startsWith('FAILED')), ['FAILED: The job contains invalid names.']);
+    assert.deepEqual(failedLines(t), ['FAILED: The job contains invalid names.']);
   }
 });
 
@@ -156,18 +415,18 @@ test('honours the optional template-owner allow-list', async () => {
   t.env.ALLOWED_TEMPLATE_OWNERS = 'someone-else, another';
   await exercise(t);
   assert.deepEqual(t.calls, []);
-  assert.ok(t.logs.some(l => l.startsWith('FAILED')));
+  assert.ok(failedLines(t).length === 1);
   const ok = setup({ job: baseJob(pair), privateKeyPem: pair.privateKeyPem });
   ok.env.ALLOWED_TEMPLATE_OWNERS = 'CS101';
   await exercise(ok);
-  assert.equal(ok.calls.length, 4);
+  assert.equal(ok.calls.filter(c => c[0] === 'create').length, 2);
 });
 
 test('stops cleanly if the server refuses the claim or the batch id is bad', async () => {
   const pair = generateRosterKeyPair();
   const refused = setup({ job: baseJob(pair), privateKeyPem: pair.privateKeyPem, serverStatus: 403 });
   await exercise(refused);
-  assert.deepEqual(refused.logs.filter(l => l.startsWith('FAILED')), ['FAILED: Could not fetch the job from the ClassRepo server (HTTP 403).']);
+  assert.deepEqual(failedLines(refused), ['FAILED: Could not fetch the job from the ClassRepo server (HTTP 403).']);
   assert.deepEqual(refused.calls, []);
 
   const bad = setup({ job: baseJob(pair), privateKeyPem: pair.privateKeyPem });
@@ -189,14 +448,16 @@ test('fails with guidance when no roster key secret exists yet', async () => {
   const pair = generateRosterKeyPair();
   const t = setup({ job: baseJob(pair), privateKeyPem: '' });
   await exercise(t);
-  assert.match(t.logs.find(l => l.startsWith('FAILED')), /Enable encrypted roster/);
+  assert.match(failedLines(t)[0], /Turn on the encrypted roster/);
   assert.deepEqual(t.calls, []);
 });
+
+// ------------------------------------------------------------------------------------------------ roster
 
 test('records the roster only in a private tracking repo, with markdown-safe cells', async () => {
   const pair = generateRosterKeyPair();
   const job = baseJob(pair);
-  job.students[0].sealed = seal(pair.publicKeyB64, { github: 'alice-gh', name: 'Al | <b>x</b> [link](http://evil)\nnewline', email: 'alice@univ.edu' });
+  job.repos[0] = repoEntry(pair, { github: 'alice-gh', name: 'Al | <b>x</b> [link](http://evil)\nnewline', email: 'alice@univ.edu' }, { sync_key: 'k1' });
   const t = setup({ job, privateKeyPem: pair.privateKeyPem });
   let readme = '';
   t.deps.execFile = (cmd, args, opts) => {
@@ -223,6 +484,8 @@ test('does not record the roster when the tracking repo is public', async () => 
   assert.ok(t.logs.some(l => l.includes('tracking repository is public')));
 });
 
+// ------------------------------------------------------------------------------------------------ setup_keys
+
 test('setup_keys stores the private key as a secret and sends only the public key', async () => {
   const t = setup({ job: { mode: 'setup_keys' }, privateKeyPem: '' });
   await exercise(t);
@@ -232,55 +495,33 @@ test('setup_keys stores the private key as a secret and sends only the public ke
   assert.equal(gh.opts.env.GH_TOKEN, 'ghs_executor');
   const reg = t.requests.find(r => r.url.endsWith('/roster-key'));
   assert.deepEqual(Object.keys(reg.body), ['public_key']);
-  assert.ok(!JSON.stringify(t.requests).includes('PRIVATE KEY'));
+  assert.ok(!JSON.stringify(t.requests.filter(r => r.url.endsWith('/roster-key'))).includes('PRIVATE KEY'));
   assert.ok(!t.logs.join('\n').includes('PRIVATE KEY'));
   assert.ok(t.secrets.some(s => s.includes('BEGIN PRIVATE KEY')), 'private key must be masked');
+});
+
+test('setup_keys also introduces the bot, so the server knows its version straight after setup', async () => {
+  const t = setup({ job: { mode: 'setup_keys' }, privateKeyPem: '' });
+  await exercise(t);
+  assert.deepEqual(t.requests.find(r => r.url.endsWith('/claim')).body.bot.protocols, [2]);
 });
 
 test('setup_keys fails clearly if the secret cannot be stored, and does not register a key', async () => {
   const t = setup({ job: { mode: 'setup_keys' }, privateKeyPem: '', execFile: () => { throw new Error('gh failed'); } });
   await exercise(t);
-  assert.match(t.logs.find(l => l.startsWith('FAILED')), /Secrets permission/);
+  assert.match(failedLines(t)[0], /Secrets permission/);
   assert.ok(!t.requests.some(r => r.url.endsWith('/roster-key')));
 });
 
-test('unknown job types fail', async () => {
-  const t = setup({ job: { mode: 'something-else' }, privateKeyPem: '' });
-  await exercise(t);
-  assert.deepEqual(t.logs.filter(l => l.startsWith('FAILED')), ['FAILED: Unknown job type.']);
-});
+// ------------------------------------------------------------------------------------------------ identity by account id
+
+const idJob = (pair, records) => ({ ...baseJob(pair), repos: records.map((r, i) => repoEntry(pair, r, { sync_key: `k${i}` })) });
 
 test('the checked-in interop vector is also accepted by the workflow path', async () => {
-  const t = setup({ job: { ...baseJob({ publicKeyB64: vector.publicKeyB64 }), students: [{ sealed: vector.sealed, sync_key: null }] }, privateKeyPem: vector.privateKeyPem });
+  const job = { ...baseJob({ publicKeyB64: vector.publicKeyB64 }), repos: [{ sync_key: null, collaborators: [{ sealed: vector.sealed, permission: 'push' }], settings: {} }] };
+  const t = setup({ job, privateKeyPem: vector.privateKeyPem });
   await exercise(t);
-  assert.deepEqual(t.calls, [['create', 'lab1-alice-example'], ['invite', 'alice-example']]);
-});
-
-test('turns off GitHub Actions in student repos only when the assignment asks for it', async () => {
-  const pair = generateRosterKeyPair();
-  const on = setup({ job: baseJob(pair, { disable_actions: true }), privateKeyPem: pair.privateKeyPem });
-  await exercise(on);
-  assert.deepEqual(on.calls.filter(c => c[0] === 'actions'), [['actions', 'lab1-alice-gh', false], ['actions', 'lab1-bob-gh', false]]);
-
-  const off = setup({ job: baseJob(pair), privateKeyPem: pair.privateKeyPem });
-  await exercise(off);
-  assert.deepEqual(off.calls.filter(c => c[0] === 'actions'), []);
-});
-
-test('a failure to turn off Actions is a generic warning, not a failed student, and leaks nothing', async () => {
-  const pair = generateRosterKeyPair();
-  const t = setup({ job: baseJob(pair, { disable_actions: true }), privateKeyPem: pair.privateKeyPem,
-    githubOverrides: { actions: async () => { throw new Error('forbidden for alice-gh'); } } });
-  await exercise(t);
-  assert.deepEqual(results(t), [{ index: 0, status: 'ready' }]);
-  assert.ok(t.logs.some(l => l.startsWith('warning: Could not turn off GitHub Actions')));
-  assert.ok(!t.logs.join('\n').includes('alice-gh'));
-  assert.ok(!t.logs.some(l => l.startsWith('FAILED')));
-});
-
-const idJob = (pair, records) => ({
-  mode: 'student_join', template: 'cs101/starter', assignment_name: 'lab1', target_owner: 'cs101-org', add_codespaces: false, shortcode: 'abc123xyz',
-  students: records.map((r, i) => ({ sealed: seal(pair.publicKeyB64, r), sync_key: `k${i}` })),
+  assert.deepEqual(t.calls.map(c => c.slice(0, 2)), [['create', 'lab1-alice-example'], ['topics', 'lab1-alice-example'], ['invite', 'alice-example']]);
 });
 
 test('uses the handle the account has now, so a renamed student is still invited', async () => {
@@ -288,18 +529,18 @@ test('uses the handle the account has now, so a renamed student is still invited
   const t = setup({ job: idJob(pair, [{ github_id: 77, github: 'old-name', name: 'Rena Med', email: 'rena@univ.edu' }]),
     privateKeyPem: pair.privateKeyPem, githubOverrides: { logins: { 77: 'new-name' } } });
   await exercise(t);
-  assert.deepEqual(t.calls, [['lookup', 77], ['create', 'lab1-new-name'], ['invite', 'new-name']]);
+  assert.deepEqual(t.calls.map(c => c.slice(0, 2)), [['lookup', 77], ['create', 'lab1-new-name'], ['topics', 'lab1-new-name'], ['invite', 'new-name']]);
   assert.deepEqual(results(t), [{ index: 0, status: 'ready' }]);
   const roster = fs.readFileSync(path.join(t.tmpDir, 'logs_generated', 'new-name.txt'), 'utf8');
   assert.match(roster, /github_id: 77/);
   assert.match(roster, /github_handle: new-name/);
+  assert.match(roster, /permission: push/);
   const everything = t.logs.join('\n');
   for (const s of ['old-name', 'new-name', 'Rena Med', 'rena@univ.edu']) assert.ok(!everything.includes(s), `leaked ${s}`);
 });
 
 test('a recycled handle never reaches the wrong person: the account id decides', async () => {
   const pair = generateRosterKeyPair();
-  // The sealed handle now belongs to a different account (id 999), but the student's own account (77) is "alice-new".
   const t = setup({ job: idJob(pair, [{ github_id: 77, github: 'taken-handle', name: 'A', email: 'a@x' }]),
     privateKeyPem: pair.privateKeyPem, githubOverrides: { logins: { 77: 'alice-new' } } });
   await exercise(t);
