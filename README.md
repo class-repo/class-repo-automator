@@ -1,3 +1,5 @@
+**[← Return to ClassRepo setup](https://classrepo.org/dashboard?tab=setup)**
+
 # ClassRepo bot (your copy)
 
 This is the small repository that creates your students' assignment repositories. The [ClassRepo](https://github.com/class-repo/class-repo-site) server starts
