@@ -121,10 +121,21 @@ async function run({ github, context, core, env = process.env, deps = {} }) {
         throw new Error(`The repository exists, but sending the invitation failed (HTTP ${e.status || 'error'}).`);
       }
       if (job.add_codespaces) await addCodespacesBadge(repoName); // best effort
+      if (job.disable_actions) await disableActions(repoName); // best effort
 
       const lines = [`github_handle: ${record.github}`, `name: ${oneLine(record.name)}`, `email: ${oneLine(record.email) || 'no-email'}`,
         `created_at: ${new Date().toISOString()}`, `repo: ${owner}/${repoName}`];
       fs.writeFileSync(path.join(logDir, `${record.github}.txt`), lines.join('\n'));
+    }
+
+    // Students have write access, so they could add workflows that spend the organization's Actions minutes or
+    // read organization-wide secrets. Educators who don't need autograding can turn Actions off per assignment.
+    async function disableActions(repoName) {
+      try {
+        await github.rest.actions.setGithubActionsPermissionsRepository({ owner, repo: repoName, enabled: false });
+      } catch {
+        core.warning('Could not turn off GitHub Actions in one student repository.');
+      }
     }
 
     async function addCodespacesBadge(repoName) {

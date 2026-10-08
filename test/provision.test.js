@@ -44,6 +44,7 @@ function setup({ job, privateKeyPem, githubOverrides = {}, serverStatus = 200, e
         createOrUpdateFileContents: async a => { calls.push(['badge', a.repo]); },
       },
       users: { getByUsername: async () => ({ data: { type: 'Organization' } }) },
+      actions: { setGithubActionsPermissionsRepository: async a => { calls.push(['actions', a.repo, a.enabled]); if (githubOverrides.actions) await githubOverrides.actions(a); } },
     },
   };
   const requests = [];
@@ -250,4 +251,26 @@ test('the checked-in interop vector is also accepted by the workflow path', asyn
   const t = setup({ job: { ...baseJob({ publicKeyB64: vector.publicKeyB64 }), students: [{ sealed: vector.sealed, sync_key: null }] }, privateKeyPem: vector.privateKeyPem });
   await exercise(t);
   assert.deepEqual(t.calls, [['create', 'lab1-alice-example'], ['invite', 'alice-example']]);
+});
+
+test('turns off GitHub Actions in student repos only when the assignment asks for it', async () => {
+  const pair = generateRosterKeyPair();
+  const on = setup({ job: baseJob(pair, { disable_actions: true }), privateKeyPem: pair.privateKeyPem });
+  await exercise(on);
+  assert.deepEqual(on.calls.filter(c => c[0] === 'actions'), [['actions', 'lab1-alice-gh', false], ['actions', 'lab1-bob-gh', false]]);
+
+  const off = setup({ job: baseJob(pair), privateKeyPem: pair.privateKeyPem });
+  await exercise(off);
+  assert.deepEqual(off.calls.filter(c => c[0] === 'actions'), []);
+});
+
+test('a failure to turn off Actions is a generic warning, not a failed student, and leaks nothing', async () => {
+  const pair = generateRosterKeyPair();
+  const t = setup({ job: baseJob(pair, { disable_actions: true }), privateKeyPem: pair.privateKeyPem,
+    githubOverrides: { actions: async () => { throw new Error('forbidden for alice-gh'); } } });
+  await exercise(t);
+  assert.deepEqual(results(t), [{ index: 0, status: 'ready' }]);
+  assert.ok(t.logs.some(l => l.startsWith('warning: Could not turn off GitHub Actions')));
+  assert.ok(!t.logs.join('\n').includes('alice-gh'));
+  assert.ok(!t.logs.some(l => l.startsWith('FAILED')));
 });
